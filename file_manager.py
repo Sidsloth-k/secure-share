@@ -177,7 +177,7 @@ class FileManager:
                     "file_id": file_id,
                     "user_id": member['id'],
                     "share_index": share_index,
-                    "status": "pending",  # using an allowed status per your DB constraint
+                    "status": "created",  # using an allowed status per your DB constraint
                     "cloud_path": "pending"  # default non-null value to satisfy DB constraint
                 }
                 self.client.from_('key_shares').insert(key_share_record).execute()

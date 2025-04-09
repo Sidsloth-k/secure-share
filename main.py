@@ -541,8 +541,6 @@ class SecureShareCLI:
                         .select('status')\
                         .eq('file_id', file_id)\
                         .eq('user_id', user_id)\
-                        .eq('status', 'retrieved')\
-                        .single()\
                         .execute()
 
                     if existing_share.data:
