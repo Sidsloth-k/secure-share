@@ -16,6 +16,7 @@ from pathlib import Path
 from collections import Counter
 from typing import Dict, List, Optional
 
+
 # Import helper functions from your utils module.
 from utils import generate_key, encrypt_file, decrypt_file, calculate_entropy
 
@@ -39,6 +40,7 @@ except ImportError:
 
 # Set up logging
 logger = logging.getLogger("SecureShare")
+logger.setLevel(logging.DEBUG)
 
 TOKEN_PATH = 'token.json'
 CREDENTIALS_PATH = 'credentials.json'
@@ -126,7 +128,7 @@ class FileManager:
             with open(temp_path, 'wb') as f:
                 f.write(encrypted_data)
             
-            # Upload encrypted file to Supabase storage.
+            # Upload encrypted file to storage.
             try:
                 with open(temp_path, 'rb') as f:
                     self.client.storage.from_('encrypted-files').upload(
@@ -137,6 +139,7 @@ class FileManager:
                             "x-upsert": "true"
                         }
                     )
+                logger.debug("Encrypted file uploaded to cloud storage")
             except Exception as upload_error:
                 logger.error(f"Storage upload failed: {upload_error}")
                 raise
@@ -163,39 +166,45 @@ class FileManager:
             }
             
             self.client.from_('files').insert(file_record).execute()
-
+            logger.debug(f"File record created for file_id: {file_id}")
+            
             # Generate and distribute key shares.
             shares = self.shamir.generate_shares(key, len(members), threshold)
             logger.info(f"Generated {len(shares)} shares with threshold {threshold}")
 
-            # Insert key share records in the database before distributing.
-            # Use an allowed status value (for example, "pending") and a default non-null "cloud_path".
+            # For each member, create a key share record and upload the share file uniquely.
             for i, (share_index, share_data) in enumerate(shares):
                 member = members[i]
+                key_share_id = str(uuid.uuid4())
+                # Create a key share record with a placeholder for cloud_path.
                 key_share_record = {
-                    "id": str(uuid.uuid4()),
+                    "id": key_share_id,
                     "file_id": file_id,
                     "user_id": member['id'],
                     "share_index": share_index,
-                    "status": "created",  # using an allowed status per your DB constraint
-                    "cloud_path": "pending"  # default non-null value to satisfy DB constraint
+                    "status": "created",
+                    "cloud_path": ""  # will update after upload
                 }
                 self.client.from_('key_shares').insert(key_share_record).execute()
+                logger.debug(f"Created key share record with id: {key_share_id} for user: {member['id']}")
 
                 # Now distribute the share to the member's cloud storage.
+                cloud_provider = None
                 member_profile = self.client.from_('users').select('*').eq('id', member['id']).single().execute()
                 if not member_profile.data.get('cloud_connected'):
                     raise ValueError(f"Member {member['display_name']} has no cloud storage connected")
-                
                 cloud_provider = member_profile.data.get('cloud_provider')
                 if cloud_provider == 'google_drive':
-                    self._upload_to_google_drive(share_data, member, file_id)
+                    # Pass the key share record id to update the cloud_path later.
+                    self._upload_to_google_drive(share_data, member, file_id, key_share_id)
                 elif cloud_provider == 'dropbox':
-                    self._upload_to_dropbox(share_data, member, file_id)
+                    self._upload_to_dropbox(share_data, member, file_id, key_share_id)
                 elif cloud_provider == 'onedrive':
-                    self._upload_to_onedrive(share_data, member, file_id)
-
-            print("File encrypted and shares distributed to cloud storage!")
+                    self._upload_to_onedrive(share_data, member, file_id, key_share_id)
+                else:
+                    logger.warning(f"Cloud provider {cloud_provider} not supported for member {member['display_name']}")
+            
+            print("File encrypted and key shares distributed to cloud storage!")
             verification = self.verify_uploaded_file(file_id)
             print("\nEncryption Verification:")
             print(f"File size: {verification['size']} bytes")
@@ -209,9 +218,11 @@ class FileManager:
             logger.error(f"Failed to upload and encrypt file: {e}")
             raise
 
-    def _upload_to_google_drive(self, share_data: bytes, member: Dict, file_id: str):
-        """Uploads a zipped share file to the member's Google Drive.
-           If token refresh fails, force reauthentication."""
+    def _upload_to_google_drive(self, share_data: bytes, member: Dict, file_id: str, key_share_id: str):
+        """
+        Uploads a zipped share file to the member's Google Drive with a unique name,
+        then updates the key share record with the cloud path.
+        """
         try:
             member_profile = self.client.from_('users').select('*').eq('id', member['id']).single().execute()
             if not member_profile.data:
@@ -270,25 +281,34 @@ class FileManager:
                 folder_id = folder['id']
             else:
                 folder_id = folder_results['files'][0]['id']
+            logger.debug(f"Google Drive folder id: {folder_id}")
+            
+            # Create a unique file name for this key share
+            unique_share_filename = f"share_{file_id}_{member['id']}.zip"
             
             # Zip the share before upload.
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                zipf.writestr(f"share_{file_id}.bin", share_data)
+                zipf.writestr(unique_share_filename.replace(".zip", ".bin"), share_data)
             zip_buffer.seek(0)
             
             file_metadata = {
-                'name': f"share_{file_id}.zip",
+                'name': unique_share_filename,
                 'parents': [folder_id]
             }
             media = MediaIoBaseUpload(zip_buffer, mimetype='application/zip', resumable=True)
-            service.files().create(
+            upload_response = service.files().create(
                 body=file_metadata,
                 media_body=media,
                 fields='id'
             ).execute()
-            
             logger.info(f"Successfully uploaded zipped share to Google Drive for member: {member['display_name']}")
+            logger.debug(f"Google Drive upload response: {upload_response}")
+            
+            # Update the key share record with the actual cloud file name.
+            update_data = {'cloud_path': unique_share_filename, 'status': 'uploaded'}
+            self.client.from_('key_shares').update(update_data).eq('id', key_share_id).execute()
+            logger.debug(f"Key share record {key_share_id} updated with cloud_path: {unique_share_filename}")
             
         except Exception as e:
             logger.error(f"Failed to upload to Google Drive: {e}")
@@ -342,50 +362,13 @@ class FileManager:
             logger.error(f"Reauthentication failed for {member['display_name']}: {e}")
             raise
 
-    def _retrieve_from_google_drive(self, cloud_creds: dict, file_id: str, share_id: str) -> bytes:
-        """Retrieve zipped share from Google Drive, unzip it, and return the share binary."""
-        credentials = Credentials(
-            token=cloud_creds['token'],
-            refresh_token=cloud_creds['refresh_token'],
-            token_uri=cloud_creds['token_uri'],
-            client_id=cloud_creds['client_id'],
-            client_secret=cloud_creds['client_secret'],
-            scopes=cloud_creds['scopes']
-        )
-        service = build('drive', 'v3', credentials=credentials)
-        folder_name = 'SecureShare_KeyShares'
-        folder_query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder'"
-        folder_results = service.files().list(q=folder_query, spaces='drive').execute()
-        if not folder_results.get('files'):
-            raise ValueError("Key share folder not found on Google Drive.")
-        folder_id = folder_results['files'][0]['id']
-        query = f"'{folder_id}' in parents and name='share_{file_id}.zip'"
-        results = service.files().list(q=query, spaces='drive').execute()
-        items = results.get('files', [])
-        if not items:
-            raise ValueError("Share file not found in Google Drive.")
-        drive_file_id = items[0]['id']
-        request = service.files().get_media(fileId=drive_file_id)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            status, done = downloader.next_chunk()
-        fh.seek(0)
-        with zipfile.ZipFile(fh, 'r') as zipf:
-            names = zipf.namelist()
-            if not names:
-                raise ValueError("Zip share file is empty.")
-            share_data = zipf.read(names[0])
-        return share_data
-
-    def _upload_to_dropbox(self, share_data: bytes, member: Dict, file_id: str):
-        """Placeholder for Dropbox share upload (implement similar to Google Drive)"""
+    def _upload_to_dropbox(self, share_data: bytes, member: Dict, file_id: str, key_share_id: str):
+        """Placeholder for Dropbox share upload (implement similar to Google Drive)."""
         logger.info("Dropbox upload not yet implemented.")
         raise NotImplementedError("Dropbox integration is not implemented yet.")
 
-    def _upload_to_onedrive(self, share_data: bytes, member: Dict, file_id: str):
-        """Placeholder for OneDrive share upload (implement similar to Google Drive)"""
+    def _upload_to_onedrive(self, share_data: bytes, member: Dict, file_id: str, key_share_id: str):
+        """Placeholder for OneDrive share upload (implement similar to Google Drive)."""
         logger.info("OneDrive upload not yet implemented.")
         raise NotImplementedError("OneDrive integration is not implemented yet.")
 
@@ -475,7 +458,7 @@ class FileManager:
                 'message': reason
             }
             self.client.table('decryption_requests').insert(request_data).execute()
-            logger.debug(f"Decryption request created: {request_data['id']}")
+            logger.debug(f"Decryption request created for file_id: {file_id}")
             self.client.table('files').update({'status': 'pending_decryption'})\
                 .eq('id', file_id).execute()
             self.org_manager._create_audit_log(org_id, file_id, 'decryption_requested', {'reason': reason})
@@ -483,25 +466,31 @@ class FileManager:
             print("Request will expire in 24 hours.")
             print(f"Waiting for {threshold} members to submit their key shares...")
             return True
+        
         except Exception as e:
-            logger.error(f"Failed to request decryption: {e}")
-            print(f"Failed to request decryption: {e}")
-            return False
+                logger.error(f"Failed to request decryption: {e}")
+                print(f"Failed to request decryption: {e}")
+                return False
 
     def submit_key_share(self, request_id: str) -> bool:
         """Submit key share for decryption."""
         try:
+            # Fetch the decryption request along with the related file info.
             request = self.client.from_('decryption_requests')\
                 .select('*, files!inner(id, name)')\
                 .eq('id', request_id)\
                 .single()\
                 .execute()
+
             if not request.data:
-                raise ValueError("Decryption request not found")
+                print("Decryption request not found")
+                return False
+
             file_id = request.data['files']['id']
             threshold = request.data['threshold']
             user_id = self.auth.get_user_id()
-            # Retrieve the key share record without filtering by status.
+
+            # Retrieve the key share record for the current user.
             share_result = self.client.from_('key_shares')\
                 .select('*')\
                 .eq('file_id', file_id)\
@@ -510,43 +499,128 @@ class FileManager:
             if not share_result.data or len(share_result.data) == 0:
                 raise ValueError("You don't have a key share for this file")
             share_record = share_result.data[0]
-            user = self.client.from_('users').select('*').eq('id', user_id).single().execute()
+
+            # Retrieve user profile and verify cloud storage connection.
+            user = self.client.from_('users')\
+                .select('*')\
+                .eq('id', user_id)\
+                .single()\
+                .execute()
             if not user.data.get('cloud_connected'):
                 raise ValueError("Cloud storage not connected")
+
+            # Check for cloud_path in the share record.
+            cloud_path = share_record.get('cloud_path')
+            if not cloud_path:
+                print("Cloud path for key share not found")
+                return False
+
+            print("Retrieving your key share...")
+
+            # Retrieve share data from cloud storage.
             share_data = None
             if user.data.get('cloud_provider') == 'google_drive':
-                share_data = self._retrieve_from_google_drive(
-                    user.data['cloud_credentials'],
-                    file_id,
-                    share_record['id']
-                )
-            if not share_data:
-                raise ValueError("Failed to retrieve share from cloud storage")
+                try:
+                    share_data = self._retrieve_from_google_drive(
+                        user.data['cloud_credentials'],
+                        file_id=share_record['file_id'],
+                        share_id=share_record['id']
+                    )
+                except Exception as cloud_error:
+                    print(f"Failed to retrieve share from Google Drive: {str(cloud_error)}")
+                    return False
+
+            # Save the retrieved share data locally for decryption.
             cache_dir = Path("temp_shares") / request_id
             cache_dir.mkdir(parents=True, exist_ok=True)
             share_path = cache_dir / f"share_{share_record['id']}.bin"
             with open(share_path, 'wb') as f:
                 f.write(share_data)
+            print(f"Share saved locally at: {share_path}")
+
+            # Update the key share record to indicate retrieval.
             self.client.from_('key_shares').update({'status': 'retrieved'})\
-                .eq('id', share_record['id']).execute()
-            current_shares = request.data['current_shares'] + 1
+                .eq('id', share_record['id'])\
+                .execute()
+
+            # Refresh the decryption request and increment current_shares.
+            request_updated = self.client.from_('decryption_requests')\
+                .select('*')\
+                .eq('id', request_id)\
+                .single()\
+                .execute()
+            current_shares = request_updated.data.get('current_shares', 0) + 1
             new_status = 'ready' if current_shares >= threshold else 'pending'
+
+            # IMPORTANT: Use the header to avoid returning full row data.
             self.client.from_('decryption_requests').update({
                 'current_shares': current_shares,
                 'status': new_status
-            }).eq('id', request_id).execute()
+            }).eq('id', request_id).execute(headers={"Prefer": "return=minimal"})
+
+            print(f"Decryption request updated: {current_shares} shares collected")
             if current_shares >= threshold:
                 print("Threshold reached! Starting decryption...")
                 self._process_decryption(request_id, file_id)
             else:
                 print(f"Share submitted! {current_shares}/{threshold} shares collected")
             return True
-        except Exception as e:
-            logger.error(f"Failed to submit key share: {e}")
-            raise
 
-    def _process_decryption(self, request_id: str, file_id: str) -> bool:
-        """Process file decryption when threshold is met."""
+        except Exception as e:
+         print(f"Failed to submit key share: {str(e)}")
+        return False
+
+
+    def _retrieve_from_google_drive(self, cloud_creds: dict, file_id: str, share_id: str) -> bytes:
+        """
+        Retrieve the zipped share from Google Drive using the unique cloud_path,
+        unzip it, and return the share binary.
+        """
+        try:
+            credentials = Credentials(
+                token=cloud_creds['token'],
+                refresh_token=cloud_creds['refresh_token'],
+                token_uri=cloud_creds['token_uri'],
+                client_id=cloud_creds['client_id'],
+                client_secret=cloud_creds['client_secret'],
+                scopes=cloud_creds['scopes']
+            )
+            service = build('drive', 'v3', credentials=credentials)
+            folder_name = 'SecureShare_KeyShares'
+            folder_query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder'"
+            folder_results = service.files().list(q=folder_query, spaces='drive').execute()
+            if not folder_results.get('files'):
+                raise ValueError("Key share folder not found on Google Drive.")
+            folder_id = folder_results['files'][0]['id']
+
+            # Look for the specific share file using the provided cloud_path.
+            query = f"'{folder_id}' in parents and name='{cloud_path}'"
+            results = service.files().list(q=query, spaces='drive').execute()
+            items = results.get('files', [])
+            if not items:
+                raise ValueError("Share file not found in Google Drive.")
+            drive_file_id = items[0]['id']
+            request_drive = service.files().get_media(fileId=drive_file_id)
+            fh = io.BytesIO()
+            downloader = MediaIoBaseDownload(fh, request_drive)
+            done = False
+            while not done:
+                status, done = downloader.next_chunk()
+            fh.seek(0)
+            with zipfile.ZipFile(fh, 'r') as zipf:
+                names = zipf.namelist()
+                if not names:
+                    raise ValueError("Zip share file is empty.")
+                share_data = zipf.read(names[0])
+            if not share_data:
+                raise ValueError("Retrieved share data is empty.")
+            return share_data
+        except Exception as e:
+            raise ValueError(f"Failed to retrieve share from Google Drive: {str(e)}")
+
+
+        def _process_decryption(self, request_id: str, file_id: str) -> bool:
+            """Process file decryption when threshold is met."""
         try:
             shares_dir = Path("temp_shares") / request_id
             if not shares_dir.exists():
@@ -562,7 +636,6 @@ class FileManager:
                         .eq('id', share_id)\
                         .single()\
                         .execute()
-                    # Expecting a field "share_index" in the record.
                     collected_shares.append((share_info.data['share_index'], share_data))
             file = self.client.from_('files').select('*').eq('id', file_id).single().execute()
             encrypted_data = self.client.storage.from_('encrypted-files').download(f"{file_id}/{file.data['name']}")
@@ -598,106 +671,10 @@ class FileManager:
             ]:
                 try:
                     parser(io.BytesIO(encrypted_data))
-                    return False
+                    return True
                 except Exception:
                     continue
-            return True
-        except Exception as e:
-            logger.error(f"Error verifying encryption: {e}")
             return False
-
-    def verify_uploaded_file(self, file_id: str) -> Dict:
-        """Verify uploaded file encryption status."""
-        try:
-            file = self.client.from_('files').select('*').eq('id', file_id).single().execute()
-            if not file.data:
-                return {'status': 'not_found'}
-            encrypted_data = self.client.storage.from_('encrypted-files').download(f"{file_id}/{file.data['name']}")
-            verification = {
-                'size': len(encrypted_data),
-                'entropy': calculate_entropy(encrypted_data),
-                'is_encrypted': self.verify_encryption(encrypted_data, None),
-                'shares_distributed': True  
-            }
-            return verification
         except Exception as e:
-            logger.error(f"Failed to verify file: {e}")
-            return {'status': 'error', 'message': str(e)}
-
-    def delete_file(self, file_id: str, org_id: str) -> bool:
-        """Delete an encrypted file and its shares."""
-        try:
-            user_id = self.auth.get_user_id()
-            admin_check = self.client.from_('organization_members').select('*')\
-                .eq('organization_id', org_id)\
-                .eq('user_id', user_id)\
-                .eq('role', 'admin')\
-                .execute()
-            if not admin_check.data:
-                raise ValueError("Only admins can delete files")
-            file = self.client.from_('files').select('*').eq('id', file_id).single().execute()
-            if not file.data:
-                raise ValueError("File not found")
-            self.client.storage.from_('encrypted-files').remove(f"{file_id}/{file.data['name']}")
-            self.client.from_('key_shares').delete().eq('file_id', file_id).execute()
-            self.client.from_('files').delete().eq('id', file_id).execute()
-            self.org_manager._create_audit_log(org_id, file_id, 'file_deleted', {'deleted_by': user_id})
-            logger.info(f"File {file_id} deleted successfully")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to delete file: {e}")
-            raise
-
-    def verify_file_encryption(self, file_id: str) -> Dict:
-        """Manually verify file encryption status."""
-        try:
-            file = self.client.from_('files').select('*').eq('id', file_id).single().execute()
-            if not file.data:
-                raise ValueError("File not found")
-            encrypted_data = self.client.storage.from_('encrypted-files').download(f"{file_id}/{file.data['name']}")
-            entropy = calculate_entropy(encrypted_data)
-            is_encrypted = True
-            try:
-                encrypted_data.decode('utf-8')
-                is_encrypted = False
-            except Exception:
-                pass
-            shares = self.client.from_('key_shares').select('*').eq('file_id', file_id).execute()
-            return {
-                'name': file.data['name'],
-                'size': len(encrypted_data),
-                'entropy': entropy,
-                'appears_encrypted': is_encrypted,
-                'total_shares': len(shares.data) if shares.data else 0,
-                'threshold': file.data['threshold'],
-                'status': file.data['status']
-            }
-        except Exception as e:
-            logger.error(f"Failed to verify file: {e}")
-            raise
-
-    def cleanup_expired_requests(self):
-        """Automatically cleanup cached key shares for expired decryption requests."""
-        try:
-            now_iso = datetime.datetime.now().isoformat()
-            # Query pending decryption requests that have expired.
-            expired_requests = self.client.table('decryption_requests')\
-                .select('*')\
-                .lt('expires_at', now_iso)\
-                .eq('status', 'pending')\
-                .execute()
-            if expired_requests.data:
-                for req in expired_requests.data:
-                    req_id = req.get('id')
-                    # Remove cached share files if they exist.
-                    shares_dir = Path("temp_shares") / req_id
-                    if shares_dir.exists():
-                        shutil.rmtree(shares_dir)
-                        logger.info(f"Removed temporary share directory for expired request {req_id}")
-                    # Optionally mark the request as expired.
-                    self.client.table('decryption_requests')\
-                        .update({'status': 'expired'})\
-                        .eq('id', req_id).execute()
-                    logger.info(f"Decryption request {req_id} marked as expired")
-        except Exception as e:
-            logger.error(f"Cleanup expired requests failed: {e}")
+            logger.error(f"Encryption verification failed: {e}")
+            return False

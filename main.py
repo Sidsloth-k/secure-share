@@ -6,9 +6,11 @@ import logging
 from typing import List, Dict
 import webbrowser
 
+
 from colorama import Fore, Style
 from dotenv import load_dotenv
 from supabase import create_client
+
 
 # Import our modularized components with updated paths
 from auth import Auth
@@ -394,12 +396,10 @@ class SecureShareCLI:
                 root.attributes('-topmost', True)
                 file_path = filedialog.askopenfilename(
                     title="Select file to upload",
-                    filetypes=[
-                        ("All files", "*.*"),
-                        ("Text files", "*.txt"),
-                        ("PDF files", "*.pdf"),
-                        ("Image files", "*.jpg *.jpeg *.png *.gif")
-                    ]
+                    filetypes=[("All files", "*.*"),
+                               ("Text files", "*.txt"),
+                               ("PDF files", "*.pdf"),
+                               ("Image files", "*.jpg *.jpeg *.png *.gif")]
                 )
                 root.destroy()
                 if not file_path:
@@ -490,7 +490,7 @@ class SecureShareCLI:
         """Handle key share submission"""
         self._clear_screen()
         print(f"{Fore.CYAN}===== SUBMIT KEY SHARE ====={Style.RESET_ALL}\n")
-
+        
         try:
             requests = self.client.from_('decryption_requests')\
                 .select('*, files!inner(name, organization_id, id), users!requester_id(display_name)')\
@@ -536,7 +536,7 @@ class SecureShareCLI:
                     if not user.data.get('cloud_connected'):
                         print(f"{Fore.RED}You need to connect your cloud storage first{Style.RESET_ALL}")
                         return
-
+                    
                     existing_share = self.client.from_('key_shares')\
                         .select('status')\
                         .eq('file_id', file_id)\
@@ -544,17 +544,22 @@ class SecureShareCLI:
                         .execute()
 
                     if existing_share.data:
-                        print(f"{Fore.YELLOW}You have already submitted your share for this file{Style.RESET_ALL}")
-                        return
-
-                    try:
-                        self.file_manager.submit_key_share(selected_request['id'])
+                        share_status = existing_share.data[0].get('status', '')
+                        if share_status == 'retrieved':
+                            print(f"{Fore.YELLOW}You have already submitted your share for this file{Style.RESET_ALL}")
+                            return
+                        # Otherwise, if a record exists but it's not yet retrieved, allow submission.
+                    
+                    
+                    success = self.file_manager.submit_key_share(selected_request['id'])
+                    if success:
                         print(f"{Fore.GREEN}Share submitted successfully!{Style.RESET_ALL}")
-                    except Exception as e:
-                        print(f"{Fore.RED}Failed to submit share: {str(e)}{Style.RESET_ALL}")
+                    else:
+                        print(f"{Fore.RED}Failed to submit share. Check the logs for details.{Style.RESET_ALL}")
+             
                 else:
                     print(f"{Fore.RED}Invalid selection{Style.RESET_ALL}")
-
+            
             except ValueError:
                 print(f"{Fore.RED}Invalid input{Style.RESET_ALL}")
 
@@ -1027,8 +1032,8 @@ class SecureShareCLI:
             print(f"{Fore.RED}Invalid selection: {e}{Style.RESET_ALL}")
         except Exception as e:
             print(f"{Fore.RED}Deletion failed: {e}{Style.RESET_ALL}")
-        
         input("Press Enter to continue...")
+            
 
 if __name__ == "__main__":
     cli = SecureShareCLI()
