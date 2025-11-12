@@ -14,6 +14,20 @@ from supabase import create_client
 from auth import Auth
 from org_manager import OrganizationManager
 from file_manager import FileManager
+from cli.exit_handler import exit_application
+from cli.main_menu import handle_main_menu
+from auth.pages.login import login_page
+from auth.pages.register import register_page
+from cli.terminal_utils import clear_screen
+from cli.organization_menu import handle_organization_menu
+from cli.file_menu import handle_file_menu
+from cli.account_menu import handle_account_menu
+from cli.organizations import (
+    create_organization,
+    join_organization,
+    view_organization,
+    manage_organization,
+)
 
 # Initialize logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -39,286 +53,23 @@ class SecureShareCLI:
         self.file_manager = FileManager(supabase_client, self.auth, self.org_manager)
         logger.info("SecureShare CLI initialized")
     
-    def _exit_application(self) -> None:
-        """Exit the application immediately with a friendly message."""
-        print(f"\n{Fore.YELLOW}Exiting application...{Style.RESET_ALL}")
-        raise SystemExit(0)
-
     def main_menu(self) -> None:
-        """Display main menu and handle user input"""
-        while True:
-            self._clear_screen()
-            print(f"{Fore.CYAN}===== SECURE FILE SHARING APPLICATION ====={Style.RESET_ALL}")
-            
-            if not self.auth.is_authenticated():
-                print("\n1. Login")
-                print("2. Register")
-                print("0. Exit")
-                
-                try:
-                    choice = input("\nEnter choice: ")
-                except (KeyboardInterrupt, EOFError):
-                    self._exit_application()
-                
-                if choice == '1':
-                    self.login()
-                elif choice == '2':
-                    self.register()
-                elif choice == '0':
-                    self._exit_application()
-                else:
-                    print(f"{Fore.RED}Invalid choice{Style.RESET_ALL}")
-                    input("Press Enter to continue...")
-            else:
-                print("\n1. Organization Management")
-                print("2. File Management")
-                print("3. Account Settings")
-                print("4. Log Out")
-                print("0. Exit")
-                
-                try:
-                    choice = input("\nEnter choice: ")
-                except (KeyboardInterrupt, EOFError):
-                    self._exit_application()
-                
-                if choice == '1':
-                    self.organization_menu()
-                elif choice == '2':
-                    self.file_menu()
-                elif choice == '3':
-                    self.account_menu()
-                elif choice == '4':
-                    self.auth.logout()
-                elif choice == '0':
-                    self._exit_application()
-                else:
-                    print(f"{Fore.RED}Invalid choice{Style.RESET_ALL}")
-                    input("Press Enter to continue...")
+        handle_main_menu(self)
     
     def login(self) -> None:
-        """Handle user login"""
-        self._clear_screen()
-        print(f"{Fore.CYAN}===== LOGIN ====={Style.RESET_ALL}\n")
-        
-        email = input("Email: ")
-        password = getpass.getpass("Password: ")
-        
-        if self.auth.login(email, password):
-            input(f"{Fore.GREEN}Login successful!{Style.RESET_ALL} Press Enter to continue...")
-        else:
-            input(f"{Fore.RED}Login failed.{Style.RESET_ALL} Press Enter to try again...")
+        login_page(self)
     
     def register(self) -> None:
-        """Handle user registration"""
-        self._clear_screen()
-        print(f"{Fore.CYAN}===== REGISTER ====={Style.RESET_ALL}\n")
-        
-        email = input("Email: ")
-        display_name = input("Display Name: ")
-        password = getpass.getpass("Password: ")
-        password_confirm = getpass.getpass("Confirm Password: ")
-        
-        if password != password_confirm:
-            input(f"{Fore.RED}Passwords do not match.{Style.RESET_ALL} Press Enter to try again...")
-            return
-            
-        if self.auth.register(email, password, display_name):
-            input("Press Enter to continue...")
+        register_page(self)
     
     def organization_menu(self) -> None:
-        """Display organization menu and handle user input"""
-        while True:
-            self._clear_screen()
-            print(f"{Fore.CYAN}===== ORGANIZATION MANAGEMENT ====={Style.RESET_ALL}\n")
-            
-            organizations = self.org_manager.get_user_organizations()
-            
-            if organizations:
-                print("Your Organizations:")
-                for i, org in enumerate(organizations, 1):
-                    print(f"{i}. {org['name']} ({org['member_count']} members) - {org['role']}")
-            else:
-                print("You are not a member of any organizations.")
-                
-            print("\n1. Create New Organization")
-            print("2. Join Organization")
-            print("3. View Organization Details")
-            print("4. Manage Organization")
-            print("0. Back to Main Menu")
-            
-            try:
-                choice = input("\nEnter choice: ")
-            except (KeyboardInterrupt, EOFError):
-                print(f"\n{Fore.YELLOW}Returning to main menu...{Style.RESET_ALL}")
-                break
-            
-            if choice == '1':
-                self._create_organization()
-            elif choice == '2':
-                self._join_organization()
-            elif choice == '3':
-                self._view_organization(organizations)
-            elif choice == '4':
-                self._manage_organization(organizations)
-            elif choice == '0':
-                break
-            else:
-                print(f"{Fore.RED}Invalid choice{Style.RESET_ALL}")
-                input("Press Enter to continue...")
+        handle_organization_menu(self)
     
     def file_menu(self) -> None:
-        """Display file menu and handle user input"""
-        while True:
-            self._clear_screen()
-            print(f"{Fore.CYAN}===== FILE MANAGEMENT ====={Style.RESET_ALL}\n")
-            
-            organizations = self.org_manager.get_user_organizations()
-            
-            if not organizations:
-                print(f"{Fore.YELLOW}You must be a member of an organization to manage files.{Style.RESET_ALL}")
-                input("Press Enter to continue...")
-                break
-                
-            print("Select Organization:")
-            for i, org in enumerate(organizations, 1):
-                print(f"{i}. {org['name']} ({org['member_count']} members)")
-                
-            org_choice = input("\nEnter organization number (0 to go back): ")
-            
-            if org_choice == '0':
-                break
-                
-            try:
-                org_index = int(org_choice) - 1
-                if org_index < 0 or org_index >= len(organizations):
-                    raise ValueError("Invalid organization index")
-                    
-                selected_org = organizations[org_index]
-                org_id = selected_org['id']
-                
-                # Check encryption eligibility
-                eligibility = self.org_manager.check_encryption_eligibility(org_id)
-                
-                while True:
-                    self._clear_screen()
-                    print(f"{Fore.CYAN}===== FILE MANAGEMENT: {selected_org['name']} ====={Style.RESET_ALL}\n")
-                    
-                    if not eligibility['eligible']:
-                        print(f"{Fore.YELLOW}Organization does not meet encryption requirements:{Style.RESET_ALL}")
-                        
-                        if not eligibility['member_count_met']:
-                            print(f" - Organization must have at least {eligibility['required_count']} members")
-                            print(f"   (current: {eligibility['member_count']})")
-                        
-                        if not eligibility['cloud_storage_met']:
-                            print("\n The following members need to connect cloud storage:")
-                            for member in eligibility['members_without_cloud']:
-                                print(f" - {member['display_name']} ({member['email']})")
-                        print("")
-                    
-                    files = self.file_manager.list_files(org_id)
-                    
-                    if files:
-                        print("Files:")
-                        for i, file in enumerate(files, 1):
-                            status_color = Fore.GREEN if file['status'] == 'available' else (
-                                Fore.YELLOW if file['status'] == 'pending_decryption' else Fore.CYAN
-                            )
-                            print(f"{i}. {file['name']} ({file['size']} bytes) - " +
-                                  f"Uploaded by: {file['uploader']} - " +
-                                  f"Status: {status_color}{file['status']}{Style.RESET_ALL}")
-                    else:
-                        print("No files found in this organization.")
-                        
-                    print("\n1. Upload and Encrypt File")
-                    print("2. Request File Decryption")
-                    print("3. Submit Key Share")
-                    print("4. Check Decrypted File")
-                    print("5. Verify File Encryption") 
-                    print("6. Delete File")          
-                    print("0. Back to Organizations")
-                    
-                    choice = input("\nEnter choice: ")
-
-                    if choice == '1':
-                        if eligibility['eligible']:
-                            self._upload_file(org_id)
-                        else:
-                            print(f"{Fore.RED}Organization does not meet requirements for encryption{Style.RESET_ALL}")
-                            input("Press Enter to continue...")
-                    elif choice == '2':
-                        self._request_decryption(org_id, files)
-                    elif choice == '3':
-                        self._submit_key_share(org_id)
-                    elif choice == '4':
-                        self._check_decrypted_file(org_id, files)
-                    elif choice == '5':
-                        self._verify_file_encryption(org_id, files)
-                    elif choice == '6':
-                        self._delete_file(org_id, files)
-                    elif choice == '0':
-                        break
-                    else:
-                        print(f"{Fore.RED}Invalid choice{Style.RESET_ALL}")
-                        input("Press Enter to continue...")
-
-            except (ValueError, IndexError):
-                print(f"{Fore.RED}Invalid organization selection{Style.RESET_ALL}")
-                input("Press Enter to continue...")
+        handle_file_menu(self)
 
     def account_menu(self) -> None:
-        """Display account settings menu and handle user input"""
-        while True:
-            self._clear_screen()
-            print(f"{Fore.CYAN}===== ACCOUNT SETTINGS ====={Style.RESET_ALL}\n")
-            
-            # Get user profile and cloud status
-            user_id = self.auth.get_user_id()
-            user_profile = self.client.from_('users').select('*').eq('id', user_id).single().execute()
-            
-            if user_profile.data:
-                profile = user_profile.data
-                print(f"Email: {profile['email']}")
-                print(f"Display Name: {profile['display_name']}")
-                print("\nCloud Storage Status:")
-                
-                if profile['cloud_connected']:
-                    provider = profile['cloud_provider']
-                    provider_color = {
-                        'google_drive': f"{Fore.BLUE}Google Drive{Style.RESET_ALL}",
-                        'dropbox': f"{Fore.CYAN}Dropbox{Style.RESET_ALL}",
-                        'onedrive': f"{Fore.GREEN}OneDrive{Style.RESET_ALL}"
-                    }.get(provider, provider)
-                    print(f"Connected to: {provider_color}")
-                    print(f"Status: {Fore.GREEN}Connected{Style.RESET_ALL}")
-                else:
-                    print(f"Status: {Fore.YELLOW}Not Connected{Style.RESET_ALL}")
-            
-            print("\n1. Connect Cloud Storage")
-            if user_profile.data.get('cloud_connected'):
-                print("2. Disconnect Cloud Storage")
-            print("0. Back to Main Menu")
-
-            try:
-                choice = input("\nEnter choice: ")
-            except (KeyboardInterrupt, EOFError):
-                print(f"\n{Fore.YELLOW}Returning to previous menu...{Style.RESET_ALL}")
-                break
-
-            if choice == '1':
-                if user_profile.data.get('cloud_connected'):
-                    print(f"{Fore.YELLOW}You are already connected to a cloud provider.{Style.RESET_ALL}")
-                    print("Please disconnect current provider before connecting a new one.")
-                    input("Press Enter to continue...")
-                else:
-                    self._connect_cloud_storage()
-            elif choice == '2' and user_profile.data.get('cloud_connected'):
-                self._disconnect_cloud_storage()
-            elif choice == '0':
-                break
-            else:
-                print(f"{Fore.RED}Invalid choice{Style.RESET_ALL}")
-                input("Press Enter to continue...")
+        handle_account_menu(self)
 
     def _disconnect_cloud_storage(self) -> None:
         """Handle cloud storage disconnection"""
@@ -341,34 +92,13 @@ class SecureShareCLI:
         input("Press Enter to continue...")
 
     def _clear_screen(self) -> None:
-        """Clear terminal screen"""
-        os.system('cls' if os.name == 'nt' else 'clear')
+        clear_screen()
 
     def _create_organization(self) -> None:
-        """Handle organization creation"""
-        self._clear_screen()
-        print(f"{Fore.CYAN}===== CREATE ORGANIZATION ====={Style.RESET_ALL}\n")
-
-        name = input("Organization Name: ")
-        if name:
-            try:
-                self.org_manager.create_organization(name)
-            except Exception as e:
-                print(f"{Fore.RED}Failed to create organization: {e}{Style.RESET_ALL}")
-            input("Press Enter to continue...")
+        create_organization(self)
 
     def _join_organization(self) -> None:
-        """Handle joining an organization"""
-        self._clear_screen()
-        print(f"{Fore.CYAN}===== JOIN ORGANIZATION ====={Style.RESET_ALL}\n")
-
-        invite_code = input("Enter Invite Code: ")
-        if invite_code:
-            try:
-                self.org_manager.join_organization(invite_code)
-            except Exception as e:
-                print(f"{Fore.RED}Failed to join organization: {e}{Style.RESET_ALL}")
-            input("Press Enter to continue...")
+        join_organization(self)
 
     def _upload_file(self, org_id: str) -> None:
         """Handle file upload"""
@@ -870,153 +600,10 @@ class SecureShareCLI:
         input("Press Enter to continue...")
 
     def _view_organization(self, organizations: List[Dict]) -> None:
-        """Handle viewing organization details"""
-        self._clear_screen()
-        print(f"{Fore.CYAN}===== VIEW ORGANIZATION ====={Style.RESET_ALL}\n")
-
-        if not organizations:
-            print(f"{Fore.YELLOW}You are not a member of any organizations.{Style.RESET_ALL}")
-            input("Press Enter to continue...")
-            return
-
-        print("Select organization to view:")
-        for i, org in enumerate(organizations, 1):
-            print(f"{i}. {org['name']}")
-
-        try:
-            choice = int(input("\nEnter organization number: "))
-            if choice < 1 or choice > len(organizations):
-                raise ValueError("Invalid organization number")
-
-            org = organizations[choice - 1]
-            org_id = org['id']
-            org_role = org.get('role')
-
-            while True:
-                latest_org = self.org_manager.get_organization(org_id) or {}
-                members = self.org_manager.list_organization_members(org_id)
-                member_count = len(members)
-
-                name = latest_org.get('name', org.get('name'))
-                invite_code = latest_org.get('invite_code', org.get('invite_code', 'N/A'))
-                invites_enabled = latest_org.get('invite_enabled', org.get('invite_enabled', False))
-
-                self._clear_screen()
-                print(f"{Fore.CYAN}===== ORGANIZATION DETAILS ====={Style.RESET_ALL}\n")
-                print(f"Name: {name}")
-                print(f"Member Count: {member_count}")
-                print(f"Invite Code: {invite_code}")
-                print(f"Invites Enabled: {'Yes' if invites_enabled else 'No'}")
-                
-                if members:
-                    print("\nMembers:")
-                    for member in members:
-                        role_color = Fore.GREEN if member['role'] == 'admin' else Fore.BLUE
-                        print(f"- {member['display_name']} ({member['email']}) - Role: {role_color}{member['role']}{Style.RESET_ALL}")
-                else:
-                    print("\nNo members found.")
-
-                if org_role == 'admin':
-                    print("\nAdmin Options:")
-                    print("1. Toggle Invites")
-                    print("2. Regenerate Invite Code")
-                    print("0. Back")
-
-                    try:
-                        admin_choice = input("\nEnter choice: ")
-                    except (KeyboardInterrupt, EOFError):
-                        print(f"\n{Fore.YELLOW}Returning to previous menu...{Style.RESET_ALL}")
-                        break
-                    if admin_choice == '1':
-                        new_state = not invites_enabled
-                        self.org_manager.toggle_invites(org_id, new_state)
-                        input("Press Enter to refresh details...")
-                    elif admin_choice == '2':
-                        self.org_manager.regenerate_invite_code(org_id)
-                        input("Press Enter to refresh details...")
-                    elif admin_choice == '0':
-                        break
-                    else:
-                        print(f"{Fore.RED}Invalid choice{Style.RESET_ALL}")
-                        input("Press Enter to continue...")
-                else:
-                    input("Press Enter to continue...")
-                    break
-
-        except (ValueError, IndexError):
-            print(f"{Fore.RED}Invalid organization selection{Style.RESET_ALL}")
-            input("Press Enter to continue...")
+        view_organization(self, organizations)
 
     def _manage_organization(self, organizations: List[Dict]) -> None:
-        """Handle admin organization management"""
-        self._clear_screen()
-        print(f"{Fore.CYAN}===== MANAGE ORGANIZATION ====={Style.RESET_ALL}\n")
-
-        admin_orgs = [org for org in organizations if org['role'] == 'admin']
-        
-        if not admin_orgs:
-            print(f"{Fore.YELLOW}You are not an admin of any organizations.{Style.RESET_ALL}")
-            input("Press Enter to continue...")
-            return
-
-        print("Select organization to manage:")
-        for i, org in enumerate(admin_orgs, 1):
-            print(f"{i}. {org['name']} ({org['member_count']} members)")
-
-        try:
-            choice = int(input("\nEnter organization number: "))
-            if choice < 1 or choice > len(admin_orgs):
-                raise ValueError("Invalid organization number")
-
-            org = admin_orgs[choice - 1]
-            org_id = org['id']
-
-            while True:
-                self._clear_screen()
-                print(f"{Fore.CYAN}===== MANAGE {org['name'].upper()} ====={Style.RESET_ALL}\n")
-                members = self.org_manager.list_organization_members(org_id)
-                
-                print("Members:")
-                for i, member in enumerate(members, 1):
-                    role_color = Fore.GREEN if member['role'] == 'admin' else Fore.BLUE
-                    print(f"{i}. {member['display_name']} ({member['email']}) - {role_color}{member['role']}{Style.RESET_ALL}")
-
-                print("\nAdmin Actions:")
-                print("1. Remove Member")
-                print("0. Back")
-
-                try:
-                    admin_choice = input("\nEnter choice: ")
-                except (KeyboardInterrupt, EOFError):
-                    print(f"\n{Fore.YELLOW}Returning to previous menu...{Style.RESET_ALL}")
-                    break
-                
-                if admin_choice == '1':
-                    member_num = int(input("Enter member number to remove: "))
-                    if member_num < 1 or member_num > len(members):
-                        print(f"{Fore.RED}Invalid member number{Style.RESET_ALL}")
-                    else:
-                        member = members[member_num - 1]
-                        if member['id'] == self.auth.get_user_id():
-                            print(f"{Fore.RED}You cannot remove yourself from the organization{Style.RESET_ALL}")
-                        else:
-                            confirm = input(f"Are you sure you want to remove {member['display_name']}? (y/n): ")
-                            if confirm.lower() == 'y':
-                                try:
-                                    self.org_manager.remove_member(org_id, member['id'])
-                                    print(f"{Fore.GREEN}Member removed successfully{Style.RESET_ALL}")
-                                except Exception as e:
-                                    print(f"{Fore.RED}Failed to remove member: {e}{Style.RESET_ALL}")
-                    input("Press Enter to continue...")
-                elif admin_choice == '0':
-                    break
-                else:
-                    print(f"{Fore.RED}Invalid choice{Style.RESET_ALL}")
-                    input("Press Enter to continue...")
-
-        except (ValueError, IndexError):
-            print(f"{Fore.RED}Invalid selection{Style.RESET_ALL}")
-            input("Press Enter to continue...")
+        manage_organization(self, organizations)
 
     def _verify_file_encryption(self, org_id: str, files: List[Dict]) -> None:
         """Handle manual file encryption verification"""

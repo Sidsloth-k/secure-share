@@ -1,8 +1,32 @@
 .env
+.env.*
 .venv/
+venv/
+
+# Python cache and build artifacts
 __pycache__/
-*.pyc
-*.pyo
-*.log
-.DS_Store
 /pycache/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+build/
+dist/
+
+# Tooling caches
+.mypy_cache/
+.pytest_cache/
+coverage/
+.ruff_cache/
+
+# IDE/editor settings
+.DS_Store
+.idea/
+.vscode/
+
+# Local databases and misc
+*.db
+*.sqlite
+*.sqlite3
+*.log
