@@ -78,8 +78,29 @@ class OrganizationManager:
             
             if not response.data:
                 raise Exception("Failed to create organization")
+            
+            org = response.data[0]
+            org_id = org['id']
+            
+            # Add creator as admin member
+            member_data = {
+                'organization_id': org_id,
+                'user_id': user_id,
+                'joined_at': datetime.datetime.now().isoformat(),
+                'role': 'admin',
+                'status': 'active'
+            }
+            
+            self.client.table('organization_members').insert(member_data).execute()
+            logger.debug(f"Added creator as admin member to organization: {org_id}")
+            
+            # Create audit log
+            self._create_audit_log(org_id, None, 'organization_created')
+            
+            print(f"{Fore.GREEN}Successfully created organization: {name}{Style.RESET_ALL}")
+            print(f"Invite code: {Fore.YELLOW}{invite_code}{Style.RESET_ALL}")
                 
-            return response.data[0]
+            return org
                 
         except Exception as e:
             logger.error(f"Failed to create organization: {e}")
