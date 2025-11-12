@@ -39,6 +39,11 @@ class SecureShareCLI:
         self.file_manager = FileManager(supabase_client, self.auth, self.org_manager)
         logger.info("SecureShare CLI initialized")
     
+    def _exit_application(self) -> None:
+        """Exit the application immediately with a friendly message."""
+        print(f"\n{Fore.YELLOW}Exiting application...{Style.RESET_ALL}")
+        raise SystemExit(0)
+
     def main_menu(self) -> None:
         """Display main menu and handle user input"""
         while True:
@@ -50,15 +55,17 @@ class SecureShareCLI:
                 print("2. Register")
                 print("0. Exit")
                 
-                choice = input("\nEnter choice: ")
+                try:
+                    choice = input("\nEnter choice: ")
+                except (KeyboardInterrupt, EOFError):
+                    self._exit_application()
                 
                 if choice == '1':
                     self.login()
                 elif choice == '2':
                     self.register()
                 elif choice == '0':
-                    print("\nExiting application...")
-                    break
+                    self._exit_application()
                 else:
                     print(f"{Fore.RED}Invalid choice{Style.RESET_ALL}")
                     input("Press Enter to continue...")
@@ -69,7 +76,10 @@ class SecureShareCLI:
                 print("4. Log Out")
                 print("0. Exit")
                 
-                choice = input("\nEnter choice: ")
+                try:
+                    choice = input("\nEnter choice: ")
+                except (KeyboardInterrupt, EOFError):
+                    self._exit_application()
                 
                 if choice == '1':
                     self.organization_menu()
@@ -80,8 +90,7 @@ class SecureShareCLI:
                 elif choice == '4':
                     self.auth.logout()
                 elif choice == '0':
-                    print("\nExiting application...")
-                    break
+                    self._exit_application()
                 else:
                     print(f"{Fore.RED}Invalid choice{Style.RESET_ALL}")
                     input("Press Enter to continue...")
@@ -137,7 +146,11 @@ class SecureShareCLI:
             print("4. Manage Organization")
             print("0. Back to Main Menu")
             
-            choice = input("\nEnter choice: ")
+            try:
+                choice = input("\nEnter choice: ")
+            except (KeyboardInterrupt, EOFError):
+                print(f"\n{Fore.YELLOW}Returning to main menu...{Style.RESET_ALL}")
+                break
             
             if choice == '1':
                 self._create_organization()
@@ -286,7 +299,11 @@ class SecureShareCLI:
                 print("2. Disconnect Cloud Storage")
             print("0. Back to Main Menu")
 
-            choice = input("\nEnter choice: ")
+            try:
+                choice = input("\nEnter choice: ")
+            except (KeyboardInterrupt, EOFError):
+                print(f"\n{Fore.YELLOW}Returning to previous menu...{Style.RESET_ALL}")
+                break
 
             if choice == '1':
                 if user_profile.data.get('cloud_connected'):
@@ -376,7 +393,12 @@ class SecureShareCLI:
         print("2. Select file using file dialog")
         print("0. Cancel")
 
-        choice = input("\nEnter choice: ")
+        try:
+            choice = input("\nEnter choice: ")
+        except (KeyboardInterrupt, EOFError):
+            print(f"\n{Fore.YELLOW}Returning to file management menu...{Style.RESET_ALL}")
+            input("Press Enter to continue...")
+            return
 
         if choice == '0':
             return
@@ -868,40 +890,62 @@ class SecureShareCLI:
 
             org = organizations[choice - 1]
             org_id = org['id']
-            members = self.org_manager.list_organization_members(org_id)
+            org_role = org.get('role')
 
-            self._clear_screen()
-            print(f"{Fore.CYAN}===== ORGANIZATION DETAILS ====={Style.RESET_ALL}\n")
-            print(f"Name: {org['name']}")
-            print(f"Member Count: {org['member_count']}")
-            print(f"Invite Code: {org.get('invite_code', 'N/A')}")
-            print(f"Invites Enabled: {'Yes' if org.get('invite_enabled', False) else 'No'}")
-            
-            if members:
-                print("\nMembers:")
-                for member in members:
-                    role_color = Fore.GREEN if member['role'] == 'admin' else Fore.BLUE
-                    print(f"- {member['display_name']} ({member['email']}) - Role: {role_color}{member['role']}{Style.RESET_ALL}")
-            else:
-                print("\nNo members found.")
+            while True:
+                latest_org = self.org_manager.get_organization(org_id) or {}
+                members = self.org_manager.list_organization_members(org_id)
+                member_count = len(members)
 
-            if org['role'] == 'admin':
-                print("\nAdmin Options:")
-                print("1. Toggle Invites")
-                print("2. Regenerate Invite Code")
-                print("0. Back")
+                name = latest_org.get('name', org.get('name'))
+                invite_code = latest_org.get('invite_code', org.get('invite_code', 'N/A'))
+                invites_enabled = latest_org.get('invite_enabled', org.get('invite_enabled', False))
 
-                admin_choice = input("\nEnter choice: ")
-                if admin_choice == '1':
-                    new_state = not org.get('invite_enabled', False)
-                    self.org_manager.toggle_invites(org_id, new_state)
-                elif admin_choice == '2':
-                    self.org_manager.regenerate_invite_code(org_id)
+                self._clear_screen()
+                print(f"{Fore.CYAN}===== ORGANIZATION DETAILS ====={Style.RESET_ALL}\n")
+                print(f"Name: {name}")
+                print(f"Member Count: {member_count}")
+                print(f"Invite Code: {invite_code}")
+                print(f"Invites Enabled: {'Yes' if invites_enabled else 'No'}")
+                
+                if members:
+                    print("\nMembers:")
+                    for member in members:
+                        role_color = Fore.GREEN if member['role'] == 'admin' else Fore.BLUE
+                        print(f"- {member['display_name']} ({member['email']}) - Role: {role_color}{member['role']}{Style.RESET_ALL}")
+                else:
+                    print("\nNo members found.")
+
+                if org_role == 'admin':
+                    print("\nAdmin Options:")
+                    print("1. Toggle Invites")
+                    print("2. Regenerate Invite Code")
+                    print("0. Back")
+
+                    try:
+                        admin_choice = input("\nEnter choice: ")
+                    except (KeyboardInterrupt, EOFError):
+                        print(f"\n{Fore.YELLOW}Returning to previous menu...{Style.RESET_ALL}")
+                        break
+                    if admin_choice == '1':
+                        new_state = not invites_enabled
+                        self.org_manager.toggle_invites(org_id, new_state)
+                        input("Press Enter to refresh details...")
+                    elif admin_choice == '2':
+                        self.org_manager.regenerate_invite_code(org_id)
+                        input("Press Enter to refresh details...")
+                    elif admin_choice == '0':
+                        break
+                    else:
+                        print(f"{Fore.RED}Invalid choice{Style.RESET_ALL}")
+                        input("Press Enter to continue...")
+                else:
+                    input("Press Enter to continue...")
+                    break
 
         except (ValueError, IndexError):
             print(f"{Fore.RED}Invalid organization selection{Style.RESET_ALL}")
-        
-        input("Press Enter to continue...")
+            input("Press Enter to continue...")
 
     def _manage_organization(self, organizations: List[Dict]) -> None:
         """Handle admin organization management"""
@@ -941,7 +985,11 @@ class SecureShareCLI:
                 print("1. Remove Member")
                 print("0. Back")
 
-                admin_choice = input("\nEnter choice: ")
+                try:
+                    admin_choice = input("\nEnter choice: ")
+                except (KeyboardInterrupt, EOFError):
+                    print(f"\n{Fore.YELLOW}Returning to previous menu...{Style.RESET_ALL}")
+                    break
                 
                 if admin_choice == '1':
                     member_num = int(input("Enter member number to remove: "))
@@ -1034,4 +1082,7 @@ class SecureShareCLI:
 
 if __name__ == "__main__":
     cli = SecureShareCLI()
-    cli.main_menu()
+    try:
+        cli.main_menu()
+    except (KeyboardInterrupt, EOFError):
+        print(f"\n{Fore.YELLOW}Exiting application...{Style.RESET_ALL}")

@@ -39,7 +39,12 @@ class OrganizationManager:
             if response.data:
                 for item in response.data:
                     org = item.get('organizations', {})
+                    if not org:
+                        continue
+                    org_id = org.get('id')
                     org['role'] = item.get('role')
+                    if org_id:
+                        org['member_count'] = self.get_member_count(org_id)
                     organizations.append(org)
                 logger.debug(f"Found {len(organizations)} organizations for user")
             
@@ -47,6 +52,37 @@ class OrganizationManager:
         except Exception as e:
             logger.error(f"Failed to fetch user organizations: {e}")
             return []
+
+    def get_member_count(self, org_id: str) -> int:
+        """Get current member count for an organization"""
+        try:
+            response = self.client.table('organization_members')\
+                .select('id', count='exact')\
+                .eq('organization_id', org_id)\
+                .execute()
+
+            if hasattr(response, 'count') and response.count is not None:
+                return response.count
+
+            return len(response.data or [])
+        except Exception as e:
+            logger.warning(f"Failed to fetch member count for organization {org_id}: {e}")
+            return 0
+
+    def get_organization(self, org_id: str) -> Optional[Dict]:
+        """Fetch latest organization details"""
+        user_id = self.auth.get_user_id()
+        if not user_id:
+            logger.warning("Cannot get organization: User not authenticated")
+            return None
+
+        try:
+            response = self.client.table('organizations').select('*').eq('id', org_id).execute()
+            if response.data:
+                return response.data[0]
+        except Exception as e:
+            logger.error(f"Failed to fetch organization {org_id}: {e}")
+        return None
     
     def create_organization(self, name: str) -> Dict:
         """Create a new organization"""
@@ -134,8 +170,22 @@ class OrganizationManager:
                 return False
                 
             # Check if invite code is expired
-            expires_at = datetime.datetime.fromisoformat(org.get('invite_code_expires_at', '2000-01-01'))
-            if expires_at < datetime.datetime.now():
+            expires_at_raw = org.get('invite_code_expires_at')
+            if expires_at_raw:
+                try:
+                    expires_at = datetime.datetime.fromisoformat(expires_at_raw.replace('Z', '+00:00'))
+                except ValueError:
+                    logger.warning(f"Invalid invite expiry format for organization: {org_id}")
+                    expires_at = datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
+            else:
+                expires_at = datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
+
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=datetime.timezone.utc)
+
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+
+            if expires_at < now_utc:
                 logger.warning(f"Invite code expired for organization: {org_id}")
                 print(f"{Fore.RED}Invite code has expired{Style.RESET_ALL}")
                 return False
