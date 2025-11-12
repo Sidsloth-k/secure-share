@@ -21,9 +21,14 @@ def manage_organization(cli: "SecureShareCLI", organizations: List[Dict]) -> Non
     print("Select organization to manage:")
     for i, org in enumerate(admin_orgs, 1):
         print(f"{i}. {org['name']} ({org['member_count']} members)")
+    print("0. Back")
 
     try:
-        choice = int(input("\nEnter organization number: "))
+        choice_str = input("\nEnter organization number: ")
+        if choice_str == '0':
+            return
+
+        choice = int(choice_str)
         if choice < 1 or choice > len(admin_orgs):
             raise ValueError("Invalid organization number")
 

@@ -11,12 +11,19 @@ def create_organization(cli: "SecureShareCLI") -> None:
     cli._clear_screen()
     print(f"{Fore.CYAN}===== CREATE ORGANIZATION ====={Style.RESET_ALL}\n")
 
-    name = input("Organization Name: ")
-    if name:
-        try:
-            cli.org_manager.create_organization(name)
-        except Exception as e:
-            print(f"{Fore.RED}Failed to create organization: {e}{Style.RESET_ALL}")
+    print("Enter organization details (leave blank to go back).")
+    name = input("Organization Name: ").strip()
+
+    if not name:
+        print(f"{Fore.YELLOW}Creation cancelled.{Style.RESET_ALL}")
         input("Press Enter to continue...")
+        return
+
+    try:
+        cli.org_manager.create_organization(name)
+    except Exception as e:
+        print(f"{Fore.RED}Failed to create organization: {e}{Style.RESET_ALL}")
+
+    input("Press Enter to continue...")
 
 

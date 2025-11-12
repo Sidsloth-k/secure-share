@@ -19,9 +19,14 @@ def view_organization(cli: "SecureShareCLI", organizations: List[Dict]) -> None:
     print("Select organization to view:")
     for i, org in enumerate(organizations, 1):
         print(f"{i}. {org['name']}")
+    print("0. Back")
 
     try:
-        choice = int(input("\nEnter organization number: "))
+        choice_str = input("\nEnter organization number: ")
+        if choice_str == '0':
+            return
+
+        choice = int(choice_str)
         if choice < 1 or choice > len(organizations):
             raise ValueError("Invalid organization number")
 
