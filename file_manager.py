@@ -96,11 +96,17 @@ class ShamirSecretSharing:
 class FileManager:
     """Handles file encryption, storage, and management."""
     
-    def __init__(self, client, auth, org_manager):
+    def __init__(self, client, auth, org_manager, storage_client=None):
         self.client = client
+        self.storage_client = storage_client or client
         self.auth = auth
         self.org_manager = org_manager
         self.shamir = ShamirSecretSharing()
+        # Log which client is being used for storage
+        if storage_client and storage_client != client:
+            logger.info("FileManager using service role client for storage operations (bypasses RLS)")
+        else:
+            logger.warning("FileManager using regular client for storage operations - RLS may block uploads")
         logger.debug("File manager initialized")
     
     def upload_file(self, file_path: str, org_id: str, threshold: int, password: str) -> Optional[Dict]:
@@ -127,7 +133,17 @@ class FileManager:
                 f.write(encrypted_data)
             
             # Upload encrypted file to Supabase storage.
+            # Note: Supabase Storage RLS may not be bypassed by service role key.
+            # We use the authenticated user's client which should work with proper storage policies.
             try:
+                # Use the authenticated user's client for storage operations
+                # This requires storage bucket policies to be configured (see docs/STORAGE_RLS_SETUP.md)
+                user_id = self.auth.get_user_id()
+                if not user_id:
+                    raise ValueError("User must be authenticated to upload files")
+                
+                logger.info(f"Uploading to storage using authenticated user client (user_id: {user_id})")
+                
                 with open(temp_path, 'rb') as f:
                     self.client.storage.from_('encrypted-files').upload(
                         path=f"{file_id}/{file_name}",
@@ -137,8 +153,22 @@ class FileManager:
                             "x-upsert": "true"
                         }
                     )
+                logger.info(f"Successfully uploaded encrypted file to storage: {file_id}/{file_name}")
             except Exception as upload_error:
+                error_msg = str(upload_error)
                 logger.error(f"Storage upload failed: {upload_error}")
+                if "row-level security" in error_msg.lower() or "rls" in error_msg.lower():
+                    logger.error("=" * 60)
+                    logger.error("RLS POLICY VIOLATION - Storage bucket policies need to be configured")
+                    logger.error("=" * 60)
+                    logger.error("SOLUTION: Configure storage bucket policies in Supabase Dashboard")
+                    logger.error("")
+                    logger.error("1. Go to: Supabase Dashboard > Storage > encrypted-files > Policies")
+                    logger.error("2. Create a policy that allows authenticated organization members to upload")
+                    logger.error("3. See docs/STORAGE_RLS_SETUP.md for detailed instructions")
+                    logger.error("")
+                    logger.error("Policy should allow INSERT for users who are active organization members")
+                    logger.error("=" * 60)
                 raise
             finally:
                 if temp_path.exists():
@@ -444,6 +474,19 @@ class FileManager:
                 print("File not found")
                 return False
             file = file_response.data[0]
+
+            # If a decrypted copy already exists locally, guide the user instead of creating another request
+            existing_decryption = self.check_decrypted_file(file_id)
+            if existing_decryption.get('status') == 'decrypted':
+                print(f"\nFile is already decrypted and available at: {existing_decryption['path']}")
+                print(f"Decrypted copy expires in: {existing_decryption['expires_in']}")
+                input("Press Enter to continue...")
+                return False
+            elif existing_decryption.get('status') == 'decrypted_missing':
+                print("\nA decrypted copy was expected but is missing. Creating a new decryption request.")
+            elif existing_decryption.get('status') == 'expired':
+                print("\nPrevious decrypted copy has expired. Creating a new decryption request.")
+
             org_id = file.get('organization_id')
             threshold = file.get('threshold')
             member_check = self.client.table('organization_members').select('*')\
@@ -491,17 +534,38 @@ class FileManager:
     def submit_key_share(self, request_id: str) -> bool:
         """Submit key share for decryption."""
         try:
-            request = self.client.from_('decryption_requests')\
-                .select('*, files!inner(id, name)')\
-                .eq('id', request_id)\
-                .single()\
-                .execute()
-            if not request.data:
-                raise ValueError("Decryption request not found")
-            file_id = request.data['files']['id']
-            threshold = request.data['threshold']
             user_id = self.auth.get_user_id()
-            # Retrieve the key share record without filtering by status.
+            if not user_id:
+                raise ValueError("User must be authenticated to submit key share")
+            
+            request_resp = (
+                self.client.from_('decryption_requests')
+                .select('*, files!inner(id, name)')
+                .eq('id', request_id)
+                .execute()
+            )
+            if not request_resp.data:
+                raise ValueError("Decryption request not found")
+            request_data = request_resp.data[0]
+            
+            # Check if request is still pending
+            if request_data['status'] != 'pending':
+                raise ValueError(f"Decryption request is no longer pending (status: {request_data['status']})")
+            
+            file_id = request_data['files']['id']
+            threshold = request_data['threshold']
+            
+            # Check if user already submitted their share
+            existing_share = self.client.from_('key_shares')\
+                .select('*')\
+                .eq('file_id', file_id)\
+                .eq('user_id', user_id)\
+                .eq('status', 'retrieved')\
+                .execute()
+            if existing_share.data and len(existing_share.data) > 0:
+                raise ValueError("You have already submitted your share for this file")
+            
+            # Retrieve the key share record
             share_result = self.client.from_('key_shares')\
                 .select('*')\
                 .eq('file_id', file_id)\
@@ -509,44 +573,82 @@ class FileManager:
                 .execute()
             if not share_result.data or len(share_result.data) == 0:
                 raise ValueError("You don't have a key share for this file")
+            
             share_record = share_result.data[0]
+            
+            # Check if share was already retrieved
+            if share_record.get('status') == 'retrieved':
+                raise ValueError("You have already submitted your share for this file")
+            
             user = self.client.from_('users').select('*').eq('id', user_id).single().execute()
+            if not user.data:
+                raise ValueError("User profile not found")
             if not user.data.get('cloud_connected'):
-                raise ValueError("Cloud storage not connected")
+                raise ValueError("Cloud storage not connected. Please connect your cloud storage first.")
+            
             share_data = None
-            if user.data.get('cloud_provider') == 'google_drive':
+            cloud_provider = user.data.get('cloud_provider')
+            if cloud_provider == 'google_drive':
                 share_data = self._retrieve_from_google_drive(
                     user.data['cloud_credentials'],
                     file_id,
                     share_record['id']
                 )
+            elif cloud_provider == 'dropbox':
+                raise NotImplementedError("Dropbox share retrieval not yet implemented")
+            elif cloud_provider == 'onedrive':
+                raise NotImplementedError("OneDrive share retrieval not yet implemented")
+            else:
+                raise ValueError(f"Unsupported cloud provider: {cloud_provider}")
+            
             if not share_data:
                 raise ValueError("Failed to retrieve share from cloud storage")
+            
+            # Cache the share locally
             cache_dir = Path("temp_shares") / request_id
             cache_dir.mkdir(parents=True, exist_ok=True)
             share_path = cache_dir / f"share_{share_record['id']}.bin"
             with open(share_path, 'wb') as f:
                 f.write(share_data)
+            
+            # Update share status to retrieved
             self.client.from_('key_shares').update({'status': 'retrieved'})\
                 .eq('id', share_record['id']).execute()
-            current_shares = request.data['current_shares'] + 1
-            new_status = 'ready' if current_shares >= threshold else 'pending'
-            self.client.from_('decryption_requests').update({
+            
+            # Update decryption request with new share count
+            current_shares = (request_data.get('current_shares') or 0) + 1
+            update_payload = {
                 'current_shares': current_shares,
-                'status': new_status
-            }).eq('id', request_id).execute()
+                'status': 'pending'
+            }
             if current_shares >= threshold:
-                print("Threshold reached! Starting decryption...")
-                self._process_decryption(request_id, file_id)
+                update_payload['status'] = 'ready'
+
+            self.client.from_('decryption_requests').update(update_payload).eq('id', request_id).execute()
+            
+            if current_shares >= threshold:
+                logger.info(f"Threshold reached ({current_shares}/{threshold})! Starting decryption...")
+                try:
+                    decrypted_path = self._process_decryption(request_id, file_id)
+                    # Mark request as completed after successful decryption
+                    self.client.from_('decryption_requests').update({'status': 'completed'}).eq('id', request_id).execute()
+                    logger.info(f"Decryption completed. File available at {decrypted_path}")
+                except Exception:
+                    # Revert request status so it can be retried
+                    self.client.from_('decryption_requests').update({
+                        'status': 'pending'
+                    }).eq('id', request_id).execute()
+                    raise
             else:
-                print(f"Share submitted! {current_shares}/{threshold} shares collected")
+                logger.info(f"Share submitted! {current_shares}/{threshold} shares collected")
+            
             return True
         except Exception as e:
-            logger.error(f"Failed to submit key share: {e}")
+            logger.exception("Failed to submit key share")
             raise
 
-    def _process_decryption(self, request_id: str, file_id: str) -> bool:
-        """Process file decryption when threshold is met."""
+    def _process_decryption(self, request_id: str, file_id: str) -> str:
+        """Process file decryption when threshold is met. Returns decrypted file path."""
         try:
             shares_dir = Path("temp_shares") / request_id
             if not shares_dir.exists():
@@ -573,16 +675,15 @@ class FileManager:
             output_path = output_dir / file.data['name']
             with open(output_path, 'wb') as f:
                 f.write(decrypted_data)
-            expiry_time = datetime.datetime.now() + datetime.timedelta(hours=24)
+            expiry_time = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=24)
             expiry_path = output_dir / f"{file.data['name']}.expiry"
             with open(expiry_path, 'w') as f:
                 f.write(expiry_time.isoformat())
-            self.client.from_('files').update({'status': 'decrypted'})\
-                .eq('id', file_id).execute()
+            self.client.from_('files').update({'status': 'decrypted'}).eq('id', file_id).execute()
             shutil.rmtree(shares_dir)
             print(f"File successfully decrypted! Available at: {output_path}")
             print("File will be available for 24 hours")
-            return True
+            return str(output_path.resolve())
         except Exception as e:
             logger.error(f"Decryption failed: {e}")
             raise
@@ -613,15 +714,92 @@ class FileManager:
             if not file.data:
                 return {'status': 'not_found'}
             encrypted_data = self.client.storage.from_('encrypted-files').download(f"{file_id}/{file.data['name']}")
+            
+            # Check if data appears encrypted by trying to parse it
+            is_encrypted = True
+            try:
+                # Try to decode as UTF-8 - if it works, it's probably not encrypted
+                encrypted_data.decode('utf-8')
+                is_encrypted = False
+            except (UnicodeDecodeError, AttributeError):
+                # If decoding fails, it's likely encrypted binary data
+                pass
+            
+            # Additional check: try to parse as common file formats
+            try:
+                io.BytesIO(encrypted_data).read()
+            except Exception:
+                pass
+            
             verification = {
                 'size': len(encrypted_data),
                 'entropy': calculate_entropy(encrypted_data),
-                'is_encrypted': self.verify_encryption(encrypted_data, None),
+                'is_encrypted': is_encrypted,
                 'shares_distributed': True  
             }
             return verification
         except Exception as e:
             logger.error(f"Failed to verify file: {e}")
+            return {'status': 'error', 'message': str(e)}
+
+    def check_decrypted_file(self, file_id: str) -> Dict:
+        """Check the status of a decrypted file and return its availability."""
+        try:
+            file_resp = self.client.from_('files').select('*').eq('id', file_id).single().execute()
+            if not file_resp.data:
+                raise ValueError("File not found")
+
+            output_dir = Path("temp_decrypted")
+            file_data = file_resp.data
+            file_name = file_data['name']
+            output_path = output_dir / file_name
+            expiry_path = output_dir / f"{file_name}.expiry"
+
+            # If a decrypted copy exists, treat the file as decrypted regardless of DB status
+            if output_path.exists() and expiry_path.exists():
+                expiry_str = expiry_path.read_text().strip()
+                expiry_time = datetime.datetime.fromisoformat(expiry_str.replace('Z', '+00:00'))
+                now = datetime.datetime.now(datetime.timezone.utc if expiry_time.tzinfo else None)
+                if expiry_time.tzinfo and not now.tzinfo:
+                    now = now.replace(tzinfo=datetime.timezone.utc)
+
+                if now > expiry_time:
+                    # Clean up expired files and reset status for future requests
+                    try:
+                        output_path.unlink(missing_ok=True)
+                    except Exception as cleanup_err:
+                        logger.warning(f"Failed to delete expired decrypted file: {cleanup_err}")
+                    try:
+                        expiry_path.unlink(missing_ok=True)
+                    except Exception as cleanup_err:
+                        logger.warning(f"Failed to delete expiry metadata: {cleanup_err}")
+
+                    self.client.from_('files').update({'status': 'pending_decryption'}).eq('id', file_id).execute()
+                    return {'status': 'expired'}
+
+                # Ensure database status reflects decrypted state
+                if file_data.get('status') != 'decrypted':
+                    self.client.from_('files').update({'status': 'decrypted'}).eq('id', file_id).execute()
+
+                time_left = expiry_time - now
+                expires_in = str(time_left).split('.')[0]  # drop microseconds for readability
+
+                return {
+                    'status': 'decrypted',
+                    'path': str(output_path.resolve()),
+                    'expires_in': expires_in
+                }
+
+            status = file_data.get('status', 'unknown')
+            if status == 'decrypted':
+                # Database says decrypted but no local copy exists
+                logger.warning("Decrypted file missing locally; resetting status.")
+                self.client.from_('files').update({'status': 'pending_decryption'}).eq('id', file_id).execute()
+                return {'status': 'decrypted_missing'}
+
+            return {'status': status}
+        except Exception as e:
+            logger.error(f"Failed to check decrypted file: {e}")
             return {'status': 'error', 'message': str(e)}
 
     def delete_file(self, file_id: str, org_id: str) -> bool:

@@ -197,5 +197,18 @@ Press `Ctrl+C` at any prompt to return to the previous menu or exit gracefully.
 
 ---
 
+## Documentation & Issues
+
+### Critical Issues
+- **[Key Share Redistribution Issue](docs/KEY_SHARE_REDISTRIBUTION_ISSUE.md)** – Critical issue affecting file decryption when members leave organizations. **⚠️ Requires immediate attention.**
+
+### Project Management
+- **[TODO & Milestones](TODO.md)** – Tracked issues, feature enhancements, and development milestones.
+
+### Additional Documentation
+- **[Database README](database/README.md)** – Database setup, migrations, and seeding instructions.
+
+---
+
 ## License
 This project is private and confidential. Distribution requires explicit authorization from the project owners.

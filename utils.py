@@ -35,8 +35,7 @@ def encrypt_file(file_path: str, key: bytes) -> (bytes, bytes):
     aesgcm = AESGCM(key)
     with open(file_path, 'rb') as f:
         file_data = f.read()
-    timestamp = str(int(time.time())).encode()  # Associated data (could be used for replay protection)
-    encrypted_data = aesgcm.encrypt(nonce, file_data, timestamp)
+    encrypted_data = aesgcm.encrypt(nonce, file_data, None)
     logger.debug(f"Encrypted data size: {len(encrypted_data)} bytes")
     return encrypted_data, nonce
 

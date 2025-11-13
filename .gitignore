@@ -30,3 +30,7 @@ coverage/
 *.sqlite
 *.sqlite3
 *.log
+
+# Runtime temp directories
+temp_decrypted/
+temp_shares/

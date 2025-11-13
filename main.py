@@ -46,13 +46,39 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger("SecureShare")
 
 # Load environment variables and create the Supabase client
-load_dotenv()
+# Explicitly load .env file from current directory
+env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+load_dotenv(dotenv_path=env_path)
+
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
 if not SUPABASE_URL or not SUPABASE_KEY:
     logger.error("SUPABASE_URL and SUPABASE_KEY must be set in the environment")
     sys.exit(1)
+
 supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+storage_service_client = None
+if SUPABASE_SERVICE_ROLE_KEY:
+    try:
+        storage_service_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        logger.info("✓ Initialized Supabase storage service client with service role key (will bypass RLS)")
+        logger.info(f"Service role key loaded: {len(SUPABASE_SERVICE_ROLE_KEY)} characters")
+        # Verify the client is different from regular client
+        if storage_service_client == supabase_client:
+            logger.warning("⚠ WARNING: Storage service client appears to be the same as regular client!")
+        else:
+            logger.debug("✓ Storage service client is distinct from regular client")
+    except Exception as exc:
+        logger.warning(f"Failed to initialize storage service client: {exc}")
+        storage_service_client = None
+else:
+    logger.warning("⚠ SUPABASE_SERVICE_ROLE_KEY not set - storage operations may fail due to RLS. Please set it in your .env file.")
+    logger.warning(f"Current working directory: {os.getcwd()}")
+    logger.warning(f"Looking for .env at: {env_path}")
+    logger.warning(f".env file exists: {os.path.exists(env_path)}")
 
 
 class SecureShareCLI:
@@ -62,7 +88,12 @@ class SecureShareCLI:
         self.client = supabase_client  
         self.auth = Auth(supabase_client)
         self.org_manager = OrganizationManager(supabase_client, self.auth)
-        self.file_manager = FileManager(supabase_client, self.auth, self.org_manager)
+        self.file_manager = FileManager(
+            supabase_client,
+            self.auth,
+            self.org_manager,
+            storage_client=storage_service_client or supabase_client
+        )
         logger.info("SecureShare CLI initialized")
 
     def main_menu(self) -> None:

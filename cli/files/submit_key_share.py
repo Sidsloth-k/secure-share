@@ -31,8 +31,22 @@ def submit_key_share(cli: "SecureShareCLI", org_id: str) -> None:
             file_name = req['files']['name']
             requester = req['users']['display_name']
             shares = f"{req['current_shares']}/{req['threshold']}"
-            expires = datetime.datetime.fromisoformat(req['expires_at'])
-            time_left = expires - datetime.datetime.now()
+            
+            # Handle timezone-aware and timezone-naive datetimes
+            expires_str = req['expires_at']
+            if isinstance(expires_str, str):
+                expires = datetime.datetime.fromisoformat(expires_str.replace('Z', '+00:00'))
+            else:
+                expires = expires_str
+            
+            # Ensure both datetimes are timezone-aware or both are naive
+            now = datetime.datetime.now(datetime.timezone.utc) if expires.tzinfo else datetime.datetime.now()
+            if expires.tzinfo and not now.tzinfo:
+                now = now.replace(tzinfo=datetime.timezone.utc)
+            elif not expires.tzinfo and now.tzinfo:
+                expires = expires.replace(tzinfo=datetime.timezone.utc)
+            
+            time_left = expires - now
             hours_left = time_left.total_seconds() / 3600
 
             print(f"\n{i}. File: {file_name}")
@@ -68,7 +82,6 @@ def submit_key_share(cli: "SecureShareCLI", org_id: str) -> None:
                     .eq('file_id', file_id)
                     .eq('user_id', user_id)
                     .eq('status', 'retrieved')
-                    .single()
                     .execute()
                 )
 
