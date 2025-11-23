@@ -99,278 +99,7 @@ Secure Share uses a three-layer architecture:
 
 ### Technical Process Flow
 
-#### 1. File Upload & Encryption Process
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    FILE UPLOAD WORKFLOW                      │
-└─────────────────────────────────────────────────────────────┘
-
-Step 1: User Initiates Upload
-    │
-    ├─► User selects file from local system
-    ├─► User selects organization
-    ├─► User sets decryption threshold (e.g., 4 out of 5 members)
-    └─► User provides password for key derivation
-    │
-    ▼
-Step 2: Local Encryption
-    │
-    ├─► Generate encryption key from password using PBKDF2-HMAC-SHA256
-    │   • Salt: 16 random bytes
-    │   • Iterations: 100,000
-    │   • Key length: 32 bytes (256 bits)
-    │
-    ├─► Encrypt file using AES-256-GCM
-    │   • Algorithm: AES-GCM (Galois/Counter Mode)
-    │   • Nonce: 12 random bytes (96 bits)
-    │   • Authenticated encryption with associated data
-    │
-    └─► Store encrypted file temporarily
-    │
-    ▼
-Step 3: Key Share Generation
-    │
-    ├─► Get organization member list
-    ├─► Validate: members >= threshold
-    │
-    ├─► Generate shares using Shamir's Secret Sharing
-    │   • Prime modulus: 2²⁵⁶ - 189
-    │   • Number of shares (n): Number of organization members
-    │   • Threshold (t): Minimum shares required (user-specified)
-    │   • Each share: (x, y) where x = share_index, y = 32-byte value
-    │
-    └─► Create share records in database
-    │
-    ▼
-Step 4: Share Distribution
-    │
-    ├─► For each organization member:
-    │   │
-    │   ├─► Retrieve member's cloud storage credentials
-    │   ├─► Package share as ZIP file
-    │   ├─► Upload to member's personal cloud storage
-    │   │   • Google Drive: SecureShare_KeyShares/ folder
-    │   │   • File name: share_{file_id}.zip
-    │   │
-    │   └─► Update key_shares table:
-    │       • status = 'pending'
-    │       • cloud_path = path in cloud storage
-    │
-    ▼
-Step 5: Encrypted File Storage
-    │
-    ├─► Upload encrypted file to Supabase Storage
-    │   • Bucket: encrypted-files
-    │   • Path: {file_id}/{original_filename}
-    │
-    └─► Create file record in database:
-        • id, name, size, type
-        • organization_id, uploader_id
-        • storage_path, threshold, total_shares
-        • nonce (base64), salt (base64)
-        • status = 'available'
-    │
-    ▼
-Step 6: Completion
-    │
-    └─► File encrypted and shares distributed
-        All members notified (via database records)
-```
-
-#### 2. Threshold Secret Sharing (Shamir's Scheme)
-
-**Mathematical Foundation:**
-
-Secure Share uses **Shamir's Secret Sharing** algorithm with the following parameters:
-
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| **Prime Modulus** | 2²⁵⁶ - 189 | Large prime for finite field arithmetic |
-| **Secret** | 32 bytes (256 bits) | AES-256 encryption key |
-| **Shares (n)** | Number of org members | Total shares generated |
-| **Threshold (t)** | User-specified (≥3) | Minimum shares required for reconstruction |
-
-**How It Works:**
-
-1. **Share Generation:**
-   - Convert 32-byte encryption key to integer
-   - Generate random polynomial: `P(x) = secret + a₁x + a₂x² + ... + aₜ₋₁xᵗ⁻¹` (mod prime)
-   - Evaluate polynomial at points x = 1, 2, 3, ..., n
-   - Each share is (x, P(x)) where P(x) is stored as 32 bytes
-
-2. **Share Properties:**
-   - **Information-theoretic security**: Any t-1 shares reveal zero information about the secret
-   - **Independence**: Shares are mathematically independent
-   - **Threshold property**: Exactly t shares are needed (no more, no less)
-
-3. **Reconstruction:**
-   - Uses **Lagrange interpolation** to reconstruct the polynomial
-   - Formula: `secret = Σ(yᵢ × Lᵢ(0))` where Lᵢ is the i-th Lagrange basis polynomial
-   - Result: Original 32-byte encryption key
-
-**Example Scenario:**
-
-```
-Organization: 5 members
-File uploaded with threshold = 4
-
-Share Distribution:
-├─ Member 1: Share (1, y₁) → Stored in Member 1's Google Drive
-├─ Member 2: Share (2, y₂) → Stored in Member 2's Google Drive
-├─ Member 3: Share (3, y₃) → Stored in Member 3's Google Drive
-├─ Member 4: Share (4, y₄) → Stored in Member 4's Google Drive
-└─ Member 5: Share (5, y₅) → Stored in Member 5's Google Drive
-
-Decryption Requirements:
-✓ Any 4 of 5 shares can reconstruct the key
-✗ 3 or fewer shares cannot reveal any information
-✓ All 5 shares can reconstruct the key
-```
-
-#### 3. Decryption Workflow
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                  DECRYPTION WORKFLOW                         │
-└─────────────────────────────────────────────────────────────┘
-
-Step 1: Decryption Request
-    │
-    ├─► User selects file to decrypt
-    ├─► System creates decryption_request record:
-    │   • status = 'pending'
-    │   • threshold = file.threshold
-    │   • current_shares = 0
-    │   • expires_at = now() + 24 hours
-    │
-    └─► All organization members notified (via database query)
-    │
-    ▼
-Step 2: Share Collection
-    │
-    ├─► Each member retrieves their share:
-    │   │
-    │   ├─► Member authenticates with cloud storage
-    │   ├─► Locate share file: SecureShare_KeyShares/share_{file_id}.zip
-    │   ├─► Download and extract share data
-    │   └─► Submit share to system
-    │
-    ├─► System updates decryption_request:
-    │   • current_shares += 1
-    │   • Share cached in temp_shares/{request_id}/
-    │
-    └─► Repeat until threshold reached
-    │
-    ▼
-Step 3: Threshold Check
-    │
-    ├─► System checks: current_shares >= threshold?
-    │
-    ├─► If NO: Continue waiting for more shares
-    │
-    └─► If YES: Proceed to reconstruction
-    │
-    ▼
-Step 4: Key Reconstruction
-    │
-    ├─► Load all collected shares from cache
-    ├─► Apply Lagrange interpolation:
-    │   • For each share (xᵢ, yᵢ):
-    │     - Calculate Lagrange basis polynomial Lᵢ(0)
-    │     - Multiply: yᵢ × Lᵢ(0)
-    │   • Sum all terms: secret = Σ(yᵢ × Lᵢ(0))
-    │
-    └─► Reconstruct 32-byte encryption key
-    │
-    ▼
-Step 5: File Decryption
-    │
-    ├─► Download encrypted file from Supabase Storage
-    ├─► Decrypt using AES-256-GCM:
-    │   • Key: Reconstructed key
-    │   • Nonce: From file record (base64 decoded)
-    │   • Algorithm: AES-GCM decryption
-    │
-    ├─► Save decrypted file to temp_decrypted/
-    │
-    └─► Update decryption_request:
-        • status = 'ready'
-        • File available for download
-    │
-    ▼
-Step 6: File Retrieval
-    │
-    └─► User downloads decrypted file
-        File automatically deleted after expiration (24 hours)
-```
-
-#### 4. Distributed Storage Model
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│              DISTRIBUTED STORAGE ARCHITECTURE                  │
-└─────────────────────────────────────────────────────────────┘
-
-┌──────────────────────────────────────────────────────────────┐
-│                    SUPABASE (Centralized)                    │
-│                                                              │
-│  ┌────────────────────────────────────────────────────┐     │
-│  │  PostgreSQL Database                               │     │
-│  │  • users                                           │     │
-│  │  • organizations                                   │     │
-│  │  • organization_members                            │     │
-│  │  • files (metadata only)                           │     │
-│  │  • key_shares (metadata only)                      │     │
-│  │  • decryption_requests                             │     │
-│  │  • audit_logs                                      │     │
-│  └────────────────────────────────────────────────────┘     │
-│                                                              │
-│  ┌────────────────────────────────────────────────────┐     │
-│  │  Supabase Storage                                  │     │
-│  │  • Bucket: encrypted-files                         │     │
-│  │  • Contains: Encrypted file data only               │     │
-│  │  • Access: Row-Level Security (RLS) policies       │     │
-│  │  • Note: Supabase cannot decrypt files             │     │
-│  └────────────────────────────────────────────────────┘     │
-│                                                              │
-│  ┌────────────────────────────────────────────────────┐     │
-│  │  Supabase Auth                                    │     │
-│  │  • User authentication                             │     │
-│  │  • JWT token management                           │     │
-│  │  • Session management                              │     │
-│  └────────────────────────────────────────────────────┘     │
-└──────────────────────────────────────────────────────────────┘
-                            │
-                            │ Metadata & Encrypted Files
-                            │
-┌───────────────────────────┴──────────────────────────────────┐
-│              CLOUD STORAGE (Distributed)                    │
-│                                                              │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
-│  │ Member 1's  │  │ Member 2's  │  │ Member N's  │     │
-│  │ Google Drive │  │ Google Drive │  │ Google Drive │     │
-│  │              │  │              │  │              │     │
-│  │ Share 1      │  │ Share 2      │  │ Share N      │     │
-│  │ (Encrypted)  │  │ (Encrypted)  │  │ (Encrypted)  │     │
-│  └──────────────┘  └──────────────┘  └──────────────┘     │
-│                                                              │
-│  Key Properties:                                              │
-│  • Each member controls their own cloud storage              │
-│  • Shares stored in personal accounts                       │
-│  • No single point of failure                               │
-│  • Platform cannot access shares                            │
-└──────────────────────────────────────────────────────────────┘
-```
-
-**Security Guarantees:**
-
-| Component | What It Stores | Who Can Access | Security Level |
-|-----------|----------------|----------------|----------------|
-| **Supabase Database** | Metadata, file records, share records | Organization members (via RLS) | High (encrypted at rest) |
-| **Supabase Storage** | Encrypted file data | Organization members (via RLS) | High (encrypted, but platform can see encrypted data) |
-| **Cloud Storage** | Key shares (encrypted) | Individual member only | Highest (member controls access) |
-| **Local System** | Decrypted files (temporary) | User only | Highest (local control) |
+For detailed technical process workflows, see [Technical Process Workflow](docs/technical_process_workflow.md).
 
 ---
 
@@ -563,503 +292,13 @@ secure-share/
 
 ## 📊 Database Schema
 
-### Entity Relationship Diagram
-
-```
-┌─────────────┐         ┌──────────────────────┐         ┌─────────────┐
-│   users     │         │ organization_members │         │organizations│
-├─────────────┤         ├──────────────────────┤         ├─────────────┤
-│ id (PK)     │◄──┐     │ id (PK)              │     ┌──►│ id (PK)     │
-│ email       │   │     │ organization_id (FK) │     │   │ name        │
-│ display_name│   │     │ user_id (FK)          │─────┘   │ admin_id(FK)│
-│ cloud_*     │   │     │ role                 │         │ invite_code │
-└─────────────┘   │     │ status               │         └─────────────┘
-                  │     └──────────────────────┘
-                  │
-┌─────────────────┴─────────────────────────────────────────────────────┐
-│                                                                        │
-│  ┌─────────────┐         ┌──────────────┐         ┌──────────────┐  │
-│  │   files     │         │  key_shares  │         │decryption_   │  │
-│  ├─────────────┤         ├──────────────┤         │  requests    │  │
-│  │ id (PK)     │◄─────────│ id (PK)      │         ├──────────────┤  │
-│  │ name        │         │ file_id (FK) │         │ id (PK)       │  │
-│  │ org_id (FK) │         │ user_id (FK) │         │ file_id (FK) │  │
-│  │ uploader_id │         │ share_index  │         │ requester_id  │  │
-│  │ threshold   │         │ cloud_path   │         │ status        │  │
-│  │ nonce       │         │ status       │         │ current_shares│  │
-│  │ salt        │         └──────────────┘         └──────────────┘  │
-│  └─────────────┘                                                      │
-│                                                                        │
-│  ┌─────────────┐                                                      │
-│  │ audit_logs  │                                                      │
-│  ├─────────────┤                                                      │
-│  │ id (PK)     │                                                      │
-│  │ user_id(FK) │                                                      │
-│  │ org_id (FK) │                                                      │
-│  │ file_id(FK)│                                                      │
-│  │ action      │                                                      │
-│  │ timestamp   │                                                      │
-│  │ details     │                                                      │
-│  └─────────────┘                                                      │
-└────────────────────────────────────────────────────────────────────────┘
-```
-
-### Database Tables
-
-#### 1. `users` Table
-
-| Column | Type | Constraints | Description |
-|--------|------|-------------|-------------|
-| `id` | UUID | PRIMARY KEY, DEFAULT uuid_generate_v4() | User unique identifier |
-| `email` | TEXT | UNIQUE, NOT NULL | User email address |
-| `display_name` | TEXT | NOT NULL | User display name |
-| `cloud_connected` | BOOLEAN | DEFAULT FALSE | Whether cloud storage is connected |
-| `cloud_provider` | TEXT | CHECK IN ('google_drive', 'dropbox', 'onedrive') | Cloud storage provider |
-| `cloud_credentials` | JSONB | - | Encrypted cloud storage credentials |
-| `created_at` | TIMESTAMPTZ | DEFAULT NOW() | Account creation timestamp |
-| `updated_at` | TIMESTAMPTZ | DEFAULT NOW() | Last update timestamp |
-
-**Indexes:**
-- Primary key on `id`
-- Unique index on `email`
-
-#### 2. `organizations` Table
-
-| Column | Type | Constraints | Description |
-|--------|------|-------------|-------------|
-| `id` | UUID | PRIMARY KEY, DEFAULT uuid_generate_v4() | Organization unique identifier |
-| `name` | TEXT | NOT NULL | Organization name |
-| `invite_code` | TEXT | UNIQUE | Unique invite code for joining |
-| `invite_code_expires_at` | TIMESTAMPTZ | - | Invite code expiration time |
-| `invite_enabled` | BOOLEAN | DEFAULT TRUE | Whether invites are enabled |
-| `admin_id` | UUID | REFERENCES users(id) ON DELETE CASCADE | Organization administrator |
-| `member_count` | INTEGER | DEFAULT 0 | Current number of members |
-| `created_at` | TIMESTAMPTZ | DEFAULT NOW() | Organization creation timestamp |
-| `updated_at` | TIMESTAMPTZ | DEFAULT NOW() | Last update timestamp |
-
-**Indexes:**
-- Primary key on `id`
-- Unique index on `invite_code`
-- Foreign key index on `admin_id`
-
-#### 3. `organization_members` Table
-
-| Column | Type | Constraints | Description |
-|--------|------|-------------|-------------|
-| `id` | UUID | PRIMARY KEY, DEFAULT uuid_generate_v4() | Membership record ID |
-| `organization_id` | UUID | NOT NULL, REFERENCES organizations(id) ON DELETE CASCADE | Organization reference |
-| `user_id` | UUID | NOT NULL, REFERENCES users(id) ON DELETE CASCADE | User reference |
-| `role` | TEXT | NOT NULL, CHECK IN ('admin', 'member') | Member role |
-| `status` | TEXT | NOT NULL, DEFAULT 'active', CHECK IN ('active', 'inactive') | Membership status |
-| `joined_at` | TIMESTAMPTZ | DEFAULT NOW() | Join timestamp |
-
-**Indexes:**
-- Primary key on `id`
-- Unique constraint on (`organization_id`, `user_id`)
-- Index on `organization_id`
-- Index on `user_id`
-
-#### 4. `files` Table
-
-| Column | Type | Constraints | Description |
-|--------|------|-------------|-------------|
-| `id` | UUID | PRIMARY KEY, DEFAULT uuid_generate_v4() | File unique identifier |
-| `name` | TEXT | NOT NULL | Original file name |
-| `size` | BIGINT | NOT NULL | File size in bytes |
-| `type` | TEXT | - | MIME type |
-| `organization_id` | UUID | NOT NULL, REFERENCES organizations(id) ON DELETE CASCADE | Organization reference |
-| `uploader_id` | UUID | NOT NULL, REFERENCES users(id) ON DELETE CASCADE | User who uploaded |
-| `uploaded_at` | TIMESTAMPTZ | DEFAULT NOW() | Upload timestamp |
-| `encrypted_at` | TIMESTAMPTZ | - | Encryption timestamp |
-| `storage_path` | TEXT | NOT NULL | Path in Supabase Storage |
-| `threshold` | INTEGER | NOT NULL, CHECK (threshold >= 3) | Minimum shares required |
-| `total_shares` | INTEGER | NOT NULL | Total number of shares |
-| `nonce` | TEXT | NOT NULL | AES-GCM nonce (base64) |
-| `salt` | TEXT | NOT NULL | PBKDF2 salt (base64) |
-| `status` | TEXT | NOT NULL, DEFAULT 'available', CHECK IN ('available', 'pending_decryption', 'decrypted', 'deleted') | File status |
-
-**Indexes:**
-- Primary key on `id`
-- Index on `organization_id`
-- Index on `uploader_id`
-
-#### 5. `key_shares` Table
-
-| Column | Type | Constraints | Description |
-|--------|------|-------------|-------------|
-| `id` | UUID | PRIMARY KEY, DEFAULT uuid_generate_v4() | Share unique identifier |
-| `file_id` | UUID | NOT NULL, REFERENCES files(id) ON DELETE CASCADE | File reference |
-| `user_id` | UUID | NOT NULL, REFERENCES users(id) ON DELETE CASCADE | Share owner |
-| `share_index` | INTEGER | NOT NULL | Share index (x-coordinate in Shamir scheme) |
-| `status` | TEXT | NOT NULL, DEFAULT 'pending', CHECK IN ('pending', 'retrieved') | Share status |
-| `cloud_path` | TEXT | NOT NULL | Path in member's cloud storage |
-| `created_at` | TIMESTAMPTZ | DEFAULT NOW() | Share creation timestamp |
-
-**Indexes:**
-- Primary key on `id`
-- Unique constraint on (`file_id`, `user_id`)
-- Index on `file_id`
-- Index on `user_id`
-
-#### 6. `decryption_requests` Table
-
-| Column | Type | Constraints | Description |
-|--------|------|-------------|-------------|
-| `id` | UUID | PRIMARY KEY, DEFAULT uuid_generate_v4() | Request unique identifier |
-| `file_id` | UUID | NOT NULL, REFERENCES files(id) ON DELETE CASCADE | File reference |
-| `requester_id` | UUID | NOT NULL, REFERENCES users(id) ON DELETE CASCADE | User requesting decryption |
-| `requested_at` | TIMESTAMPTZ | DEFAULT NOW() | Request timestamp |
-| `expires_at` | TIMESTAMPTZ | NOT NULL | Request expiration time |
-| `status` | TEXT | NOT NULL, DEFAULT 'pending', CHECK IN ('pending', 'ready', 'expired', 'completed') | Request status |
-| `current_shares` | INTEGER | DEFAULT 0 | Number of shares collected |
-| `threshold` | INTEGER | NOT NULL | Required threshold for decryption |
-| `message` | TEXT | - | Optional message from requester |
-
-**Indexes:**
-- Primary key on `id`
-- Index on `file_id`
-- Index on `status`
-
-#### 7. `audit_logs` Table
-
-| Column | Type | Constraints | Description |
-|--------|------|-------------|-------------|
-| `id` | UUID | PRIMARY KEY, DEFAULT uuid_generate_v4() | Log unique identifier |
-| `user_id` | UUID | REFERENCES users(id) ON DELETE SET NULL | User who performed action |
-| `organization_id` | UUID | REFERENCES organizations(id) ON DELETE CASCADE | Organization reference |
-| `file_id` | UUID | REFERENCES files(id) ON DELETE CASCADE | File reference (if applicable) |
-| `action` | TEXT | NOT NULL | Action description |
-| `timestamp` | TIMESTAMPTZ | DEFAULT NOW() | Action timestamp |
-| `details` | JSONB | - | Additional action details |
-
-**Indexes:**
-- Primary key on `id`
-- Index on `organization_id`
-- Index on `file_id`
-
-### Row-Level Security (RLS)
-
-All tables have Row-Level Security enabled with policies that:
-
-- **Users**: Can only read/update their own profile and profiles of organization members
-- **Organizations**: Users can only access organizations they belong to
-- **Files**: Users can only access files from their organizations
-- **Key Shares**: Users can only access their own shares
-- **Decryption Requests**: Users can only access requests for files in their organizations
-- **Audit Logs**: Users can only read logs for their organizations
+For detailed database schema documentation, see [Database Schema](database/database_schema.md).
 
 ---
 
 ## 🔄 Data Flow Diagrams
 
-### Complete System Data Flow
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    SECURE SHARE DATA FLOW                            │
-└─────────────────────────────────────────────────────────────────────┘
-
-┌──────────┐
-│   User   │
-└────┬─────┘
-     │
-     │ 1. Register/Login
-     ▼
-┌─────────────────┐
-│  Supabase Auth  │◄─────────────────┐
-│  (JWT Tokens)   │                 │
-└────┬────────────┘                 │
-     │                              │
-     │ 2. Authenticated Session     │
-     ▼
-┌─────────────────────────────────┐
-│   Secure Share CLI Application   │
-│   • Main Menu                    │
-│   • Organization Management      │
-│   • File Management              │
-│   • Account Settings             │
-└────┬────────────────────────────┘
-     │
-     │ 3. User Operations
-     ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    OPERATION FLOWS                            │
-├─────────────────────────────────────────────────────────────┤
-│                                                               │
-│  FILE UPLOAD:                                                 │
-│  User → Select File → Encrypt Locally → Generate Shares      │
-│       → Upload Encrypted File (Supabase Storage)             │
-│       → Distribute Shares (Cloud Storage)                    │
-│       → Store Metadata (Supabase Database)                   │
-│                                                               │
-│  FILE DECRYPTION:                                             │
-│  User → Request Decryption → Members Submit Shares           │
-│       → Collect Shares (Threshold Check)                     │
-│       → Reconstruct Key (Lagrange Interpolation)             │
-│       → Decrypt File → Download Decrypted File               │
-│                                                               │
-│  ORGANIZATION MANAGEMENT:                                     │
-│  User → Create/Join Org → Invite Members                     │
-│       → Manage Roles → Connect Cloud Storage                 │
-└─────────────────────────────────────────────────────────────┘
-     │
-     │ 4. Data Storage
-     ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    STORAGE LAYERS                             │
-├─────────────────────────────────────────────────────────────┤
-│                                                               │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │  SUPABASE DATABASE (Metadata)                        │   │
-│  │  • users, organizations, files                       │   │
-│  │  • key_shares (metadata only)                        │   │
-│  │  • decryption_requests, audit_logs                   │   │
-│  └─────────────────────────────────────────────────────┘   │
-│                                                               │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │  SUPABASE STORAGE (Encrypted Files)                  │   │
-│  │  • Bucket: encrypted-files                            │   │
-│  │  • Contains: AES-256-GCM encrypted file data         │   │
-│  │  • Access: RLS policies enforce organization access  │   │
-│  └─────────────────────────────────────────────────────┘   │
-│                                                               │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │  CLOUD STORAGE (Key Shares - Distributed)            │   │
-│  │  • Google Drive: Member 1's account                  │   │
-│  │  • Google Drive: Member 2's account                   │   │
-│  │  • Google Drive: Member N's account                  │   │
-│  │  • Each member controls their own shares              │   │
-│  └─────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### Authentication Flow
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                  AUTHENTICATION FLOW                         │
-└─────────────────────────────────────────────────────────────┘
-
-┌──────────┐
-│   User   │
-└────┬─────┘
-     │
-     │ 1. Start Application
-     ▼
-┌─────────────────────┐
-│  Secure Share CLI   │
-│  (main.py)          │
-└────┬────────────────┘
-     │
-     │ 2. Check Session
-     ▼
-┌─────────────────────────────────┐
-│  Session Storage                │
-│  • Development: File-based       │
-│  • Production: Database         │
-└────┬────────────────────────────┘
-     │
-     │ 3a. Session Valid?
-     │     YES → Continue to Main Menu
-     │
-     │ 3b. Session Invalid/Expired
-     ▼
-┌─────────────────────┐
-│  Login/Register     │
-│  (auth/pages/)      │
-└────┬────────────────┘
-     │
-     │ 4. User Credentials
-     ▼
-┌─────────────────────┐
-│  Supabase Auth      │
-│  • Email/Password    │
-│  • JWT Token        │
-└────┬────────────────┘
-     │
-     │ 5. Token Received
-     ▼
-┌─────────────────────────────────┐
-│  Token Manager                  │
-│  • Store JWT                    │
-│  • Auto-refresh before expiry    │
-│  • Session encryption (optional) │
-└────┬────────────────────────────┘
-     │
-     │ 6. Authenticated
-     ▼
-┌─────────────────────┐
-│  Main Menu          │
-│  • Organizations    │
-│  • Files            │
-│  • Account          │
-└─────────────────────┘
-```
-
-### File Upload Data Flow
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                  FILE UPLOAD DATA FLOW                        │
-└─────────────────────────────────────────────────────────────┘
-
-┌──────────┐
-│   User   │
-└────┬─────┘
-     │
-     │ 1. Select File + Organization + Threshold + Password
-     ▼
-┌─────────────────────────────────┐
-│  File Manager (UploadMixin)      │
-│  • Validate organization         │
-│  • Get member list               │
-│  • Check: members >= threshold  │
-└────┬────────────────────────────┘
-     │
-     │ 2. Generate Encryption Key
-     ▼
-┌─────────────────────────────────┐
-│  Key Generation (utils.py)       │
-│  • Password + Salt               │
-│  • PBKDF2-HMAC-SHA256            │
-│  • 100,000 iterations            │
-│  • Output: 32-byte key           │
-└────┬────────────────────────────┘
-     │
-     │ 3. Encrypt File
-     ▼
-┌─────────────────────────────────┐
-│  File Encryption (utils.py)      │
-│  • AES-256-GCM                   │
-│  • 12-byte nonce                 │
-│  • Authenticated encryption      │
-│  • Output: encrypted_data + nonce │
-└────┬────────────────────────────┘
-     │
-     │ 4. Generate Shares
-     ▼
-┌─────────────────────────────────┐
-│  Shamir Secret Sharing          │
-│  (file_manager/shamir.py)       │
-│  • Prime: 2²⁵⁶ - 189            │
-│  • Generate n shares (n=members)│
-│  • Threshold: t (user-specified) │
-│  • Output: [(x₁,y₁),...,(xₙ,yₙ)]│
-└────┬────────────────────────────┘
-     │
-     │ 5. Distribute Shares
-     ▼
-┌─────────────────────────────────────────────────────────────┐
-│  For Each Member:                                             │
-│  ├─► Get cloud credentials                                   │
-│  ├─► Package share as ZIP                                    │
-│  ├─► Upload to member's cloud storage                        │
-│  │   • Google Drive: SecureShare_KeyShares/share_{id}.zip   │
-│  └─► Store metadata in key_shares table                     │
-└────┬────────────────────────────────────────────────────────┘
-     │
-     │ 6. Upload Encrypted File
-     ▼
-┌─────────────────────────────────┐
-│  Supabase Storage               │
-│  • Bucket: encrypted-files      │
-│  • Path: {file_id}/{filename}   │
-│  • RLS: Organization members    │
-└────┬────────────────────────────┘
-     │
-     │ 7. Store Metadata
-     ▼
-┌─────────────────────────────────┐
-│  Supabase Database              │
-│  • files table: File metadata   │
-│  • key_shares table: Share refs │
-│  • audit_logs: Upload event     │
-└─────────────────────────────────┘
-```
-
-### Decryption Data Flow
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                  DECRYPTION DATA FLOW                         │
-└─────────────────────────────────────────────────────────────┘
-
-┌──────────┐
-│ Requester│
-└────┬─────┘
-     │
-     │ 1. Request Decryption
-     ▼
-┌─────────────────────────────────┐
-│  Create Decryption Request      │
-│  • decryption_requests table    │
-│  • status = 'pending'           │
-│  • threshold = file.threshold    │
-│  • expires_at = now() + 24h    │
-└────┬────────────────────────────┘
-     │
-     │ 2. Members Notified
-     ▼
-┌─────────────────────────────────────────────────────────────┐
-│  For Each Organization Member:                               │
-│  ├─► Member sees pending request                            │
-│  ├─► Member retrieves share from cloud storage              │
-│  │   • Authenticate with cloud provider                     │
-│  │   • Locate: SecureShare_KeyShares/share_{file_id}.zip   │
-│  │   • Download and extract share data                      │
-│  └─► Member submits share                                   │
-└────┬────────────────────────────────────────────────────────┘
-     │
-     │ 3. Share Submission
-     ▼
-┌─────────────────────────────────┐
-│  Share Collection               │
-│  • Cache share in temp_shares/  │
-│  • Update current_shares count  │
-│  • Check: current_shares >= threshold?                      │
-└────┬────────────────────────────┘
-     │
-     │ 4a. Threshold NOT Met
-     │     → Continue waiting
-     │
-     │ 4b. Threshold Met
-     ▼
-┌─────────────────────────────────┐
-│  Key Reconstruction              │
-│  (file_manager/shamir.py)       │
-│  • Load all collected shares    │
-│  • Lagrange interpolation       │
-│  • Reconstruct 32-byte key     │
-└────┬────────────────────────────┘
-     │
-     │ 5. Download Encrypted File
-     ▼
-┌─────────────────────────────────┐
-│  Supabase Storage               │
-│  • Download: {file_id}/{name}   │
-│  • Returns: encrypted_data      │
-└────┬────────────────────────────┘
-     │
-     │ 6. Decrypt File
-     ▼
-┌─────────────────────────────────┐
-│  File Decryption (utils.py)     │
-│  • AES-256-GCM decryption       │
-│  • Key: Reconstructed key       │
-│  • Nonce: From file record       │
-│  • Output: Decrypted file data  │
-└────┬────────────────────────────┘
-     │
-     │ 7. Save Decrypted File
-     ▼
-┌─────────────────────────────────┐
-│  Local Storage                  │
-│  • Path: temp_decrypted/        │
-│  • Status: 'ready'              │
-│  • Available for download       │
-│  • Auto-delete after 24h        │
-└─────────────────────────────────┘
-```
+For detailed data flow diagrams, see [Data Flow Diagrams](docs/data_flow_diagrams.md).
 
 ---
 
@@ -1079,30 +318,30 @@ All tables have Row-Level Security enabled with policies that:
 
 #### Step 1: Clone the Repository
 
-```bash
-git clone <repository-url>
-cd secure-share
-```
+   ```bash
+   git clone <repository-url>
+   cd secure-share
+   ```
 
 #### Step 2: Create Virtual Environment
 
 **Windows:**
-```bash
-python -m venv .venv
-.venv\Scripts\activate
+   ```bash
+   python -m venv .venv
+   .venv\Scripts\activate
 ```
-
+   
 **Linux/Mac:**
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-```
+   python -m venv .venv
+   source .venv/bin/activate
+   ```
 
 #### Step 3: Install Dependencies
 
-```bash
-pip install -r requirements.txt
-```
+   ```bash
+   pip install -r requirements.txt
+   ```
 
 **Key Dependencies:**
 - `supabase==1.2.0` - Backend services
@@ -1113,36 +352,36 @@ pip install -r requirements.txt
 
 #### Step 4: Configure Environment
 
-```bash
-cp env.example .env
-```
-
+   ```bash
+   cp env.example .env
+   ```
+   
 Edit `.env` and add your credentials:
 
-```env
+   ```env
 # Supabase Configuration
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_KEY=your-anon-key
-SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
-
+   SUPABASE_URL=https://your-project.supabase.co
+   SUPABASE_KEY=your-anon-key
+   SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+   
 # Database (for migrations)
 SUPABASE_DB_URL=postgresql://postgres:[PASSWORD]@db.[PROJECT].supabase.co:5432/postgres
 
 # Google Drive OAuth (for cloud storage)
-GOOGLE_CLIENT_ID=your-google-client-id
-GOOGLE_CLIENT_SECRET=your-google-client-secret
+   GOOGLE_CLIENT_ID=your-google-client-id
+   GOOGLE_CLIENT_SECRET=your-google-client-secret
 GOOGLE_REDIRECT_URI=http://localhost:8080
 
 # Environment Mode
 ENVIRONMENT=development  # or 'production'
 ENABLE_SESSION_ENCRYPTION=false  # true for production
-```
+   ```
 
 #### Step 5: Initialize Database
 
-```bash
-# Run database migrations
-python database/migrate/run_migration.py
+   ```bash
+   # Run database migrations
+   python database/migrate/run_migration.py
 ```
 
 This will:
@@ -1154,8 +393,8 @@ This will:
 **Optional: Seed Test Data**
 
 ```bash
-python database/seed/seed_data.py
-```
+   python database/seed/seed_data.py
+   ```
 
 #### Step 6: Configure Supabase Storage
 
@@ -1171,9 +410,9 @@ python database/seed/seed_data.py
 
 #### Step 7: Start the Application
 
-```bash
-python main.py
-```
+   ```bash
+   python main.py
+   ```
 
 ### First-Time Setup
 
