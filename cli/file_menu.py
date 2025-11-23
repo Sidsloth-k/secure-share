@@ -64,9 +64,22 @@ def handle_file_menu(cli: "SecureShareCLI") -> None:
                         status_color = Fore.GREEN if file['status'] == 'available' else (
                             Fore.YELLOW if file['status'] == 'pending_decryption' else Fore.CYAN
                         )
-                        print(f"{i}. {file['name']} ({file['size']} bytes) - "
-                              f"Uploaded by: {file['uploader']} - "
-                              f"Status: {status_color}{file['status']}{Style.RESET_ALL}")
+                        extra_details = ""
+                        if file.get("decryption_info"):
+                            info = file["decryption_info"]
+                            extra_details = (
+                                f" | Shares {info['current_shares']}/{info['threshold']} "
+                                f"| Time left: {info['expires_in']}"
+                            )
+                        elif file.get("status") == "decrypted" and file.get("decrypted_expires_in"):
+                            extra_details = f" | View expires in: {file['decrypted_expires_in']}"
+
+                        print(
+                            f"{i}. {file['name']} ({file['size']} bytes) - "
+                            f"Uploaded by: {file['uploader']} - "
+                            f"Status: {status_color}{file['status']}{Style.RESET_ALL}"
+                            f"{extra_details}"
+                        )
                 else:
                     print("No files found in this organization.")
 

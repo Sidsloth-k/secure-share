@@ -8,18 +8,19 @@ if TYPE_CHECKING:
 
 def check_decrypted_file(cli: "SecureShareCLI", org_id: str, files: List[Dict]) -> None:
     """Handle checking decrypted file status."""
-    if not files:
-        print(f"{Fore.YELLOW}No files available{Style.RESET_ALL}")
+    decrypted_files = [f for f in files if f.get("status") == "decrypted"]
+    if not decrypted_files:
+        print(f"{Fore.YELLOW}There are no decrypted files available right now.{Style.RESET_ALL}")
         input("Press Enter to continue...")
         return
 
     print("\nSelect file to check:")
-    for i, file in enumerate(files, 1):
+    for i, file in enumerate(decrypted_files, 1):
         print(f"{i}. {file['name']}")
 
     try:
         choice = int(input("\nEnter file number: "))
-        file = files[choice - 1]
+        file = decrypted_files[choice - 1]
         status = cli.file_manager.check_decrypted_file(file['id'])
 
         if status['status'] == 'decrypted':

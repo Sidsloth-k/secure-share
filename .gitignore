@@ -34,3 +34,4 @@ coverage/
 # Runtime temp directories
 temp_decrypted/
 temp_shares/
+temp/
