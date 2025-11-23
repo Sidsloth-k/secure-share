@@ -89,6 +89,13 @@ class VerificationMixin:
     def check_decrypted_file(self, file_id: str) -> Dict:
         """Check the status of a decrypted file and return its availability."""
         try:
+            # Clean up expired temp_shares automatically (like temp_decrypted cleanup)
+            if hasattr(self, 'cleanup_expired_temp_shares'):
+                try:
+                    self.cleanup_expired_temp_shares()
+                except Exception as cleanup_err:
+                    logger.debug(f"Temp shares cleanup failed (non-critical): {cleanup_err}")
+            
             file_resp = self.client.from_("files").select("*").eq("id", file_id).single().execute()
             if not file_resp.data:
                 raise ValueError("File not found")

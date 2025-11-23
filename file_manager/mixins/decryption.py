@@ -241,6 +241,14 @@ class DecryptionMixin:
             share_path = cache_dir / f"share_{share_record['id']}.bin"
             with open(share_path, "wb") as f:
                 f.write(share_data)
+            
+            # Create expiry metadata file (72 hours like REQUEST_TIMEOUT)
+            # Only create if it doesn't exist (first share for this request)
+            expiry_path = cache_dir / ".expiry"
+            if not expiry_path.exists():
+                expiry_time = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=72)
+                with open(expiry_path, "w") as f:
+                    f.write(expiry_time.isoformat())
 
             @retry_with_backoff(max_retries=3)
             def _update_share_status():

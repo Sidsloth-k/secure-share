@@ -276,6 +276,13 @@ class UploadMixin:
             return files
 
         try:
+            # Clean up expired temp_shares automatically when listing files
+            if hasattr(self, 'cleanup_expired_temp_shares'):
+                try:
+                    self.cleanup_expired_temp_shares()
+                except Exception as cleanup_err:
+                    logger.debug(f"Temp shares cleanup failed (non-critical): {cleanup_err}")
+            
             files, error = safe_execute(_list_files, "List files", default_return=[])
             if error:
                 print("You are not a member of this organization")
