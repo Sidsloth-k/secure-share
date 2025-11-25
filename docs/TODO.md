@@ -2,6 +2,35 @@
 
 ## 🔴 Critical Issues
 
+### [CRITICAL] Google Drive Token Expiry Blocks Share Distribution
+**Status:** 🔴 Not Started  
+**Priority:** HIGH  
+**Severity:** CRITICAL  
+**Date Identified:** 25 Nov 2025  
+**Owner:** File Upload / Cloud Storage squad
+
+**Problem:** Uploads fail during the “Upload share to cloud” phase whenever a member’s Google Drive refresh token has expired or been revoked. The Google Drive API returns `invalid_grant: Token has been expired or revoked`, causing the batch share distribution process to abort and roll back the DB insert that happened just before the cloud upload.
+
+**Impact:** No files can complete the upload/encryption flow if any target member has stale Drive credentials. All pending share insertions are rolled back and the CLI reports `Failed to distribute key shares`.
+
+**How to Reproduce:**
+1. Use an organization member whose `users.cloud_credentials` entry contains an outdated or revoked Google refresh token (common after revoking consent or rotating OAuth secrets).
+2. Attempt to upload any file with that member included in the share distribution set.
+3. Observe the logs showing a 401 response followed by `invalid_grant` during `_get_or_create_folder`, after which the upload fails and operations roll back.
+
+**Recommended Fix Steps:**
+- Detect `invalid_grant`/`RefreshError` responses inside `_upload_to_google_drive` and immediately trigger `_reauthenticate_google_drive(member)` to capture a fresh token pair before retrying the Drive API calls.
+- Add a preflight validation step before `batch_operation_with_rollback` that verifies every member’s `cloud_credentials` has a valid `refresh_token`, `token_uri`, `client_id`, `client_secret`, and non-expired `token`, forcing reconnection when data is missing or expired.
+- Surface a CLI warning that lists members blocking the upload and provide a “Reconnect Drive” prompt that clears their stored credentials to trigger the OAuth flow on next login.
+- Update README troubleshooting with guidance (see below) so operators can manually remediate by asking members to reconnect Google Drive when this error appears.
+
+**Milestones:**
+- [ ] Implement error classification for Drive uploads (detect `invalid_grant`)
+- [ ] Auto-trigger reauthentication and retry Drive upload
+- [ ] Add preflight credential validation with actionable CLI messaging
+- [ ] Add integration tests covering expired tokens
+- [ ] Update `docs/TROUBLESHOOTING.md` (or README) with remediation steps
+
 ### [CRITICAL] Key Share Redistribution When Members Leave
 **Status:** 🔴 Not Started  
 **Priority:** HIGH  

@@ -537,7 +537,11 @@ Automatic share deletion from cloud storage when files are deleted.
 
 ### 🐛 Known Bugs
 
-None currently tracked. See `docs/TODO.md` for detailed issue tracking.
+#### Google Drive token expiry blocks share uploads (identified 25 Nov 2025)
+- **Symptom:** File uploads fail during “Upload share to cloud” and roll back with logs similar to `invalid_grant: Token has been expired or revoked`.
+- **Root Cause:** Members with stale Google Drive refresh tokens inside `users.cloud_credentials` trigger a 401 from Google Drive when `_upload_to_google_drive` tries to create/find the `SecureShare_KeyShares` folder. The batch operation aborts before any shares reach cloud storage.
+- **Immediate Remediation:** Ask affected members to reconnect Google Drive (clearing their stored credentials or running `_reauthenticate_google_drive`) so a fresh refresh token is saved. Once reconnected, retry the upload.
+- **Longer-Term Fix:** Improve `_upload_to_google_drive` to trap `invalid_grant` errors, automatically invoke `_reauthenticate_google_drive`, and retry; add a preflight credential validation step before starting `batch_operation_with_rollback` so uploads warn early when a member’s cloud credentials have expired. Full task list lives in `docs/TODO.md`.
 
 ---
 
