@@ -107,6 +107,17 @@ The monolithic `auth.py` (291 lines) has been split into focused modules:
 - Coordinates between modules
 - Backward compatible interface
 
+### `auth/login_core.py`
+- Encapsulates low-level Supabase `sign_in_with_password` logic for email/password login
+- Builds the canonical session dictionary (`user_id`, email, tokens, expiry, original_lifetime)
+- Used by `Auth.login` for session persistence and client binding
+
+### `auth/register_core.py`
+- Encapsulates low-level Supabase `sign_up` + fallback `sign_in_with_password` logic
+- Handles environments where `sign_up` may or may not return a session
+- Returns both auth success status and an optional session dict + user object
+- Used by `Auth.register` to persist session and create the `public.users` profile row
+
 ## Backward Compatibility
 
 All existing code continues to work:

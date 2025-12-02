@@ -12,6 +12,8 @@ from auth.error_handler import AuthErrorHandler
 from auth.encryption import SessionEncryption
 from auth.metrics import TokenRefreshMetrics
 from auth.db_storage import DatabaseSessionStorage
+from auth.login_core import perform_login
+from auth.register_core import perform_register
 
 logger = logging.getLogger("SecureShare")
 
@@ -181,34 +183,18 @@ class Auth:
         Returns:
             True if login successful, False otherwise
         """
-        try:
-            logger.info(f"Attempting login for user: {email}")
-            response = self.client.auth.sign_in_with_password({"email": email, "password": password})
-            
-            if response:
-                user_data = response.user
-                session_data = response.session
-                
-                import time
-                self.session = {
-                    'user_id': user_data.id,
-                    'email': user_data.email,
-                    'access_token': session_data.access_token,
-                    'refresh_token': session_data.refresh_token,
-                    'expires_at': time.time() + session_data.expires_in,
-                    'original_lifetime': session_data.expires_in
-                }
-                
-                self._save_session(self.session)
-                self._set_client_session()
-                logger.info("Login successful")
-                
-                # Optionally, fetch and store profile
-                self._fetch_user_profile()
-                return True
-        except Exception as e:
-            logger.error(f"Login failed: {e}")
-        return False
+        # Delegate low-level login flow to auth.login_core.perform_login
+        session = perform_login(self.client, email, password)
+        if not session:
+            return False
+
+        # Persist session and bind to client
+        self._save_session(session)
+        self._set_client_session()
+
+        # Optionally, fetch and store profile
+        self._fetch_user_profile()
+        return True
     
     def register(self, email: str, password: str, display_name: str) -> bool:
         """
@@ -222,45 +208,40 @@ class Auth:
         Returns:
             True if registration successful, False otherwise
         """
+        # Delegate low-level registration flow to auth.register_core.perform_register
+        success, session, user_data = perform_register(self.client, email, password)
+
+        # If registration failed at auth level, propagate failure
+        if not success:
+            return False
+
+        # If we have no session (e.g., email confirmation required), treat as
+        # successful registration but without local session/profile creation.
+        if session is None or user_data is None:
+            return True
+
+        # Persist session and bind to the client so RLS sees auth.uid()
+        self._save_session(session)
+        self._set_client_session()
+
+        # Create user profile in the application users table.
+        # If RLS or other issues block this insert, we *log* but still report
+        # registration success because the auth user already exists.
         try:
-            logger.info(f"Registering new user: {email}")
-            response = self.client.auth.sign_up({"email": email, "password": password})
-            
-            if response:
-                user_data = response.user
-                session_data = response.session
-                
-                if not session_data:
-                    logger.info("Registration successful. Email verification required.")
-                    return True
-                
-                import time
-                self.session = {
-                    'user_id': user_data.id,
-                    'email': user_data.email,
-                    'access_token': session_data.access_token,
-                    'refresh_token': session_data.refresh_token,
-                    'expires_at': time.time() + session_data.expires_in,
-                    'original_lifetime': session_data.expires_in
+            self.client.table("users").insert(
+                {
+                    "id": user_data.id,
+                    "email": email,
+                    "display_name": display_name,
+                    "created_at": datetime.datetime.now().isoformat(),
+                    "cloud_connected": False,
                 }
-                
-                self._save_session(self.session)
-                self._set_client_session()
-                
-                # Create user profile in the database
-                self.client.table('users').insert({
-                    'id': user_data.id,
-                    'email': email,
-                    'display_name': display_name,
-                    'created_at': datetime.datetime.now().isoformat(),
-                    'cloud_connected': False
-                }).execute()
-                
-                logger.info("Registration and profile creation successful")
-                return True
-        except Exception as e:
-            logger.error(f"Registration failed: {e}")
-        return False
+            ).execute()
+            logger.info("Registration and profile creation successful")
+        except Exception as insert_err:
+            logger.error(f"Registration succeeded but profile insert failed: {insert_err}")
+
+        return True
     
     def logout(self) -> None:
         """Logout user and clear session."""

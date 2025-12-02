@@ -22,14 +22,14 @@ def handle_main_menu(cli: "SecureShareCLI") -> None:
             try:
                 choice = input("\nEnter choice: ")
             except (KeyboardInterrupt, EOFError):
-                exit_application()
+                exit_application(cli)
 
             if choice == '1':
                 cli.login()
             elif choice == '2':
                 cli.register()
             elif choice == '0':
-                exit_application()
+                exit_application(cli)
             else:
                 print(f"{Fore.RED}Invalid choice{Style.RESET_ALL}")
                 input("Press Enter to continue...")
@@ -43,7 +43,7 @@ def handle_main_menu(cli: "SecureShareCLI") -> None:
             try:
                 choice = input("\nEnter choice: ")
             except (KeyboardInterrupt, EOFError):
-                exit_application()
+                exit_application(cli)
 
             if choice == '1':
                 cli.organization_menu()
@@ -54,7 +54,7 @@ def handle_main_menu(cli: "SecureShareCLI") -> None:
             elif choice == '4':
                 cli.auth.logout()
             elif choice == '0':
-                exit_application()
+                exit_application(cli)
             else:
                 print(f"{Fore.RED}Invalid choice{Style.RESET_ALL}")
                 input("Press Enter to continue...")

@@ -76,40 +76,47 @@ def get_database_connection():
 
 
 def run_migration():
-    """Run SQL migration files."""
-    # Get migration file path
+    """
+    Run all SQL migration files in this directory in alphabetical order.
+    
+    Files are expected to be named with a numeric prefix, e.g.:
+      001_initial_schema.sql
+      002_some_change.sql
+      003_user_grant_creation.sql
+    """
     script_dir = Path(__file__).parent
-    migration_file = script_dir / "001_initial_schema.sql"
-    
-    if not migration_file.exists():
-        logger.error(f"Migration file not found: {migration_file}")
+    sql_files = sorted(script_dir.glob("*.sql"))
+
+    if not sql_files:
+        logger.error(f"No .sql migration files found in {script_dir}")
         sys.exit(1)
-    
-    # Read migration SQL
-    with open(migration_file, 'r', encoding='utf-8') as f:
-        migration_sql = f.read()
-    
-    # Connect to database
+
     logger.info("Connecting to database...")
     try:
         from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
-        
+
         conn = get_database_connection()
         conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
         cursor = conn.cursor()
-        
-        logger.info("Running migration: 001_initial_schema.sql")
-        
-        # Execute migration
-        cursor.execute(migration_sql)
-        
-        logger.info("✓ Migration completed successfully")
-        
+
+        for migration_file in sql_files:
+            logger.info(f"Running migration: {migration_file.name}")
+            try:
+                with open(migration_file, "r", encoding="utf-8") as f:
+                    migration_sql = f.read()
+                cursor.execute(migration_sql)
+                logger.info(f"✓ Migration {migration_file.name} completed successfully")
+            except Exception as file_err:
+                logger.error(f"Migration {migration_file.name} failed: {file_err}")
+                cursor.close()
+                conn.close()
+                return False
+
         cursor.close()
         conn.close()
-        
+        logger.info("✓ All migrations completed successfully")
         return True
-        
+
     except ImportError:
         logger.error("psycopg2-binary is required for migrations. Install it with: pip install psycopg2-binary")
         return False

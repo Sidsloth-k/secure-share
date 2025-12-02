@@ -185,3 +185,31 @@ All tables have Row-Level Security enabled with policies that:
 - **Decryption Requests**: Users can only access requests for files in their organizations
 - **Audit Logs**: Users can only read logs for their organizations
 
+### RLS and Supabase Roles
+
+Supabase exposes several Postgres roles that interact with these policies:
+
+- **`service_role`**: Full access, bypasses RLS. Used only by backend/admin scripts (for example, `seed_data.py` or migration-time maintenance).
+- **`authenticated`**: Used by normal signed-in users via the anon key + JWT. RLS policies are evaluated for this role and must explicitly allow operations.
+- **`anon`**: Anonymous role, typically only for public read access (not used by this app for writes).
+
+For the `users` table to be writable by signed-in users, we rely on:
+
+1. **RLS policy** (from `001_initial_schema.sql`):
+
+   - Policy: `"Users can insert own profile"`  
+   - Condition: `auth.uid() = id OR EXISTS (SELECT 1 FROM auth.users WHERE id = users.id)`
+
+   This ensures that:
+   - A user can only insert a profile row whose `id` matches their authenticated user id, or
+   - A service-role caller can insert rows for any valid `auth.users` entry.
+
+2. **Postgres GRANTs** (from `003_user_grant_creation.sql`):
+
+   - `GRANT USAGE ON SCHEMA public TO authenticated;`
+   - `GRANT SELECT, INSERT, UPDATE ON TABLE public.users TO authenticated;`
+   - Optionally, `GRANT USAGE/SELECT` on `auth.users` so policies that reference it can evaluate.
+
+Without these GRANTs, authenticated users would see `permission denied for table users` even if the RLS policy condition is satisfied.  
+The `003_user_grant_creation.sql` migration applies these GRANTs and fixes that class of errors.
+

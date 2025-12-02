@@ -167,4 +167,5 @@ if __name__ == "__main__":
     try:
         cli.main_menu()
     except (KeyboardInterrupt, EOFError):
-        print(f"\n{Fore.YELLOW}Exiting application...{Style.RESET_ALL}")
+        # Ensure we log out and clear session before exiting on Ctrl+C / EOF
+        exit_application(cli)

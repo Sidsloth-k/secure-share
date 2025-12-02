@@ -5,8 +5,9 @@ This directory contains database migration and seeding scripts for the Secure Sh
 ## Structure
 
 - `migrate/` - Database migration files
-  - `001_initial_schema.sql` - Initial database schema with all tables
-  - `run_migration.py` - Script to automatically run migrations
+  - `001_initial_schema.sql` - Initial database schema with all tables and RLS policies
+  - `003_user_grant_creation.sql` - Grants required privileges on `users` and related schemas
+  - `run_migration.py` - Script to automatically run **all** `.sql` migrations in order
 - `seed/` - Database seeding scripts
   - `seed_data.py` - Script to create users and organizations
 
@@ -31,18 +32,21 @@ This directory contains database migration and seeding scripts for the Secure Sh
 
 ## Running Migrations
 
-Run the migration script to create all database tables:
+Run the migration script to create or update the database schema:
 
 ```bash
 python database/migrate/run_migration.py
 ```
 
 This will:
+- Discover all `*.sql` files in `database/migrate/` (e.g. `001_initial_schema.sql`, `003_user_grant_creation.sql`)
+- Run them in **alphabetical order** (so `001_*.sql` runs before `003_*.sql`, etc.)
 - Create all necessary tables (users, organizations, files, key_shares, etc.)
 - Create indexes for better performance
 - Create triggers for automatic timestamp updates
 - Enable Row Level Security (RLS) on all tables
 - Create RLS policies for secure data access
+- Apply required `GRANT` statements (for example, `003_user_grant_creation.sql` grants `authenticated`/`anon` roles access to `public.users` and `auth.users`)
 - Attempt to create the `encrypted-files` storage bucket
 
 **Note:** The migration includes comprehensive Row Level Security policies that:
@@ -127,10 +131,14 @@ The `encrypted-files` bucket is created automatically if possible. If automatic 
 - If using RLS, ensure `SUPABASE_SERVICE_ROLE_KEY` is set in `.env` for seeding
 
 ### RLS Policy Issues
-- RLS policies are automatically created during migration
+- RLS policies are automatically created during migration (see `001_initial_schema.sql`)
 - Policies allow authenticated users to access their own data and organization data
 - Service role key bypasses RLS (use for admin operations like seeding)
 - If you encounter permission errors, check that users are properly authenticated
+- If you see errors like `permission denied for table users` even for signed-in users:
+  - Make sure you have run **all** migrations with `run_migration.py` so that `003_user_grant_creation.sql` has been applied
+  - Confirm that the `authenticated` role has `USAGE` on the `public` and `auth` schemas and `SELECT/INSERT/UPDATE` on `public.users`
+  - Check that your API calls are using an authenticated JWT (not the service role key) when hitting RLS-protected tables
 
 ## Notes
 
