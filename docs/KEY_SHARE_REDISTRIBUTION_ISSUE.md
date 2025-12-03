@@ -557,6 +557,55 @@ This is a **critical issue** that can result in permanent data loss. The recomme
 
 ---
 
+deletion map 
+
+┌─────────────────────────────────────────────────────────────┐
+│                   FILE DELETION WORKFLOW                     │
+└─────────────────────────────────────────────────────────────┘
+
+Step 1: Authorization & Validation
+  ├─ Verify user is org admin
+  ├─ Verify file exists and belongs to org
+  ├─ Check if file is already deleted
+  └─ Create pre-deletion audit log
+
+Step 2: Collect Share Information (Non-blocking)
+  ├─ Query all key_shares for file_id
+  ├─ Group by cloud_provider (google_drive, dropbox, onedrive)
+  ├─ Extract user_id, cloud_credentials, cloud_path
+  └─ Prepare deletion tasks
+
+Step 3: Delete Cloud Storage Shares (Best Effort, Async)
+  ├─ For each share:
+  │   ├─ Get user's cloud credentials
+  │   ├─ Authenticate with cloud provider
+  │   ├─ Find share file (folder + filename)
+  │   ├─ Delete file from cloud storage
+  │   └─ Log success/failure
+  ├─ Continue even if some deletions fail
+  └─ Track deletion status for reporting
+
+Step 4: Delete Encrypted File from Supabase Storage (Critical)
+  ├─ Use storage_client.from_("encrypted-files").remove()
+  ├─ Delete using storage_path from files table
+  └─ MUST succeed or abort deletion
+
+Step 5: Delete Database Records (Critical, with CASCADE)
+  ├─ Delete from files table
+  ├─ CASCADE automatically deletes:
+  │   ├─ key_shares (all shares for file_id)
+  │   └─ decryption_requests (all requests for file_id)
+  └─ MUST succeed or rollback
+
+Step 6: Post-Deletion Actions
+  ├─ Create audit log with deletion summary
+  ├─ Report deletion status:
+  │   ├─ Database: ✅ Deleted
+  │   ├─ Storage: ✅ Deleted
+  │   ├─ Cloud shares: X/Y deleted successfully
+  │   └─ Failures: List any failed share deletions
+  └─ Return detailed status report
+
 **Last Updated:** 2025-01-12  
 **Status:** 🔴 CRITICAL - Requires Immediate Attention  
 **Assigned To:** [To be assigned]  
